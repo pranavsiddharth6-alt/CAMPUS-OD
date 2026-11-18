@@ -1,0 +1,47 @@
+# Local configuration and certificates
+.env
+.env.*
+!.env.example
+.pgpass
+pgpass.conf
+*.pem
+*.crt
+*.cer
+*.der
+*.key
+*.p12
+*.pfx
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+
+# Python / Backend
+backend/.venv/
+backend/venv/
+backend/env/
+backend/__pycache__/
+backend/*/__pycache__/
+backend/*/*/__pycache__/
+backend/*/*/*/__pycache__/
+*.py[cod]
+*$py.class
+backend/.pytest_cache/
+backend/.coverage
+backend/htmlcov/
+
+# Storage & Uploads
+backend/storage/*
+!backend/storage/.gitkeep
+
+# Operating System & IDEs
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo

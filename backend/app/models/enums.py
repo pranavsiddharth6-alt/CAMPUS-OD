@@ -1,0 +1,66 @@
+"""Database enumerations for Campus OD.
+
+Sri Krishna Arts and Science College (SKASC)
+"""
+import enum
+
+
+class UserRole(str, enum.Enum):
+    STUDENT = "STUDENT"
+    TUTOR = "TUTOR"
+    ADMIN = "ADMIN"
+
+
+class ApplicationStatus(str, enum.Enum):
+    SUBMITTED = "SUBMITTED"
+    UNDER_TUTOR_REVIEW = "UNDER_TUTOR_REVIEW"
+    PRE_APPROVED = "PRE_APPROVED"
+    AWAITING_PARTICIPATION_PROOF = "AWAITING_PARTICIPATION_PROOF"
+    UNDER_FINAL_VERIFICATION = "UNDER_FINAL_VERIFICATION"
+    OD_FINALIZED = "OD_FINALIZED"
+    REJECTED = "REJECTED"
+    CORRECTION_REQUESTED = "CORRECTION_REQUESTED"
+
+
+class EventCategory(str, enum.Enum):
+    TECHNICAL = "TECHNICAL"
+    SPORTS = "SPORTS"
+    CULTURAL = "CULTURAL"
+    ACADEMIC = "ACADEMIC"
+    PAPER_PRESENTATION = "PAPER_PRESENTATION"
+    NSS_NCC = "NSS_NCC"
+    OTHER = "OTHER"
+
+
+class DaySession(str, enum.Enum):
+    FULL_DAY = "FULL_DAY"
+    FORENOON = "FORENOON"
+    AFTERNOON = "AFTERNOON"
+
+
+class EventDayStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    VERIFIED = "VERIFIED"
+    REJECTED = "REJECTED"
+
+
+class DocumentType(str, enum.Enum):
+    ORIGINAL_SIGNED_OD_FORM = "ORIGINAL_SIGNED_OD_FORM"
+    EVENT_INVITATION = "EVENT_INVITATION"
+    PARENT_CONSENT = "PARENT_CONSENT"
+    OTHER = "OTHER"
+
+
+class EvidenceReviewStatus(str, enum.Enum):
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    CORRECTION_REQUIRED = "CORRECTION_REQUIRED"
+
+
+class NotificationType(str, enum.Enum):
+    APPLICATION_SUBMITTED = "APPLICATION_SUBMITTED"
+    PRE_APPROVED = "PRE_APPROVED"
+    CORRECTION_REQUESTED = "CORRECTION_REQUESTED"
+    FINAL_VERIFIED = "FINAL_VERIFIED"
+    REJECTED = "REJECTED"
+    SYSTEM = "SYSTEM"
