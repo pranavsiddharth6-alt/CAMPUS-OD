@@ -37,6 +37,14 @@ backend/htmlcov/
 # Storage & Uploads
 backend/storage/*
 !backend/storage/.gitkeep
+.campus-od-demo/
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.invite
 
 # Operating System & IDEs
 .DS_Store

@@ -22,6 +22,11 @@ class LocalStorageService:
         unique_id = uuid.uuid4().hex
         return f"{unique_id}{ext}"
 
+    def _file_path(self, storage_key: str) -> str:
+        if not storage_key or storage_key in {".", ".."} or any(char in storage_key for char in "/\\:"):
+            raise ValueError("Invalid storage key.")
+        return os.path.join(self.base_dir, storage_key)
+
     def save_file(
         self,
         file_bytes: bytes,
@@ -36,12 +41,17 @@ class LocalStorageService:
             )
 
         storage_key = self._generate_storage_key(original_filename)
-        file_path = os.path.join(self.base_dir, storage_key)
+        file_path = self._file_path(storage_key)
 
         sha256 = hashlib.sha256(file_bytes).hexdigest()
 
-        with open(file_path, "wb") as f:
-            f.write(file_bytes)
+        file = open(file_path, "xb")
+        try:
+            with file:
+                file.write(file_bytes)
+        except OSError:
+            os.unlink(file_path)
+            raise
 
         return {
             "storage_key": storage_key,
@@ -55,7 +65,7 @@ class LocalStorageService:
 
     def get_file(self, storage_key: str) -> Tuple[bytes, str]:
         """Retrieve binary file from private storage. Returns (bytes, file_path)."""
-        file_path = os.path.join(self.base_dir, storage_key)
+        file_path = self._file_path(storage_key)
         if not os.path.isfile(file_path):
             raise FileNotFoundError(f"Stored file with key '{storage_key}' not found.")
 
@@ -66,7 +76,7 @@ class LocalStorageService:
 
     def delete_file(self, storage_key: str) -> bool:
         """Delete file from private local storage."""
-        file_path = os.path.join(self.base_dir, storage_key)
+        file_path = self._file_path(storage_key)
         if os.path.isfile(file_path):
             os.remove(file_path)
             return True

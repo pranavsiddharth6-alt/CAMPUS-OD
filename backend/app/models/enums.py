@@ -11,6 +11,17 @@ class UserRole(str, enum.Enum):
     ADMIN = "ADMIN"
 
 
+class AccountStatus(str, enum.Enum):
+    PENDING_ACTIVATION = "PENDING_ACTIVATION"
+    ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
+
+
+class AccountActionPurpose(str, enum.Enum):
+    ACTIVATION = "ACTIVATION"
+    PASSWORD_RESET = "PASSWORD_RESET"
+
+
 class ApplicationStatus(str, enum.Enum):
     SUBMITTED = "SUBMITTED"
     UNDER_TUTOR_REVIEW = "UNDER_TUTOR_REVIEW"

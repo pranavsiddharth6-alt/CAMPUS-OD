@@ -1,6 +1,6 @@
 from pydantic_settings import BaseSettings
 from typing import List, Union
-from pydantic import field_validator
+from pydantic import PositiveInt, SecretStr, field_validator
 import os
 from pathlib import Path
 
@@ -26,6 +26,17 @@ class Settings(BaseSettings):
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 20
     DB_POOL_TIMEOUT: int = 30
+
+    # Validate JWT configuration at use so health checks can run independently.
+    JWT_SIGNING_SECRET: SecretStr | None = None
+    JWT_ISSUER: str | None = None
+    JWT_AUDIENCE: str | None = None
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_MINUTES: int | str = 10
+    AUTH_SESSION_LIFETIME_MINUTES: PositiveInt = 480
+    AUTH_REFRESH_TOKEN_LIFETIME_MINUTES: PositiveInt = 120
+    AUTH_INVITATION_LIFETIME_HOURS: PositiveInt = 24
+    LOCAL_DEMO_DIR: Path | None = None
 
     # Storage
     STORAGE_DIR: str = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "storage")

@@ -34,6 +34,16 @@ def get_engine():
     """Lazily initialize the SQLAlchemy engine to ensure settings are loaded."""
     global _engine, _SessionLocal
     if _engine is None:
+        if settings.ENVIRONMENT == "local-demo":
+            from app.database.demo import DemoSession, create_demo_engine
+
+            directory = settings.LOCAL_DEMO_DIR
+            if directory is None or not (directory / "campus_od.sqlite3").is_file():
+                raise ValueError("Initialize the local demo database before starting the demo.")
+            _engine = create_demo_engine(directory)
+            _SessionLocal = sessionmaker(bind=_engine, class_=DemoSession, autoflush=False, expire_on_commit=False)
+            return _engine
+
         if not settings.DATABASE_URL:
             raise ValueError("DATABASE_URL is not configured in environment settings.")
 
@@ -94,17 +104,19 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def check_db_connection() -> dict:
-    """Test actual connectivity to PostgreSQL and return status metadata."""
+    """Test connectivity to the configured database and return status metadata."""
     start_time = time.time()
+    database = "SQLite" if settings.ENVIRONMENT == "local-demo" else "PostgreSQL"
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            result = conn.execute(text("SELECT version();")).fetchone()
+            query = "SELECT sqlite_version();" if database == "SQLite" else "SELECT version();"
+            result = conn.execute(text(query)).fetchone()
             latency_ms = round((time.time() - start_time) * 1000, 2)
             version_str = result[0] if result else "Unknown"
             return {
                 "connected": True,
-                "database": "PostgreSQL",
+                "database": database,
                 "version": version_str,
                 "latency_ms": latency_ms,
                 "error": None,
@@ -113,8 +125,8 @@ def check_db_connection() -> dict:
         latency_ms = round((time.time() - start_time) * 1000, 2)
         return {
             "connected": False,
-            "database": "PostgreSQL",
+            "database": database,
             "version": None,
             "latency_ms": latency_ms,
-            "error": str(exc),
+            "error": "Local demo database is unavailable." if database == "SQLite" else str(exc),
         }

@@ -1,9 +1,11 @@
 """Campus OD Database Models Package.
 
 Sri Krishna Arts and Science College (SKASC)
-Exposes all 19 Core Entities registered on Base.metadata.
+Exposes the models registered on Base.metadata.
 """
 from app.models.enums import (
+    AccountActionPurpose,
+    AccountStatus,
     UserRole,
     ApplicationStatus,
     EventCategory,
@@ -14,10 +16,12 @@ from app.models.enums import (
     NotificationType,
 )
 from app.models.user import (
+    AccountActionToken,
     User,
     StudentProfile,
     TutorProfile,
     AdminProfile,
+    AuthSession,
     RefreshToken,
 )
 from app.models.academic import (
@@ -43,6 +47,8 @@ from app.models.notification import Notification
 
 __all__ = [
     # Enums
+    "AccountActionPurpose",
+    "AccountStatus",
     "UserRole",
     "ApplicationStatus",
     "EventCategory",
@@ -51,7 +57,8 @@ __all__ = [
     "DocumentType",
     "EvidenceReviewStatus",
     "NotificationType",
-    # 19 Core Entities
+    # Models
+    "AccountActionToken",
     "User",
     "Department",
     "AcademicYear",
@@ -70,5 +77,6 @@ __all__ = [
     "EvidenceReview",
     "ApplicationStatusHistory",
     "Notification",
+    "AuthSession",
     "RefreshToken",
 ]

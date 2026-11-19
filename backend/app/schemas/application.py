@@ -1,12 +1,13 @@
 import uuid
 from datetime import date, datetime
-from typing import Optional, List
-from pydantic import BaseModel, Field
+from typing import Annotated, Literal, Optional, List
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 from app.models.enums import (
     ApplicationStatus,
     EventCategory,
     DaySession,
     EventDayStatus,
+    DocumentType,
 )
 
 
@@ -70,3 +71,80 @@ class StatusHistoryResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class SubmissionDay(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_date: date
+    session: DaySession = DaySession.FULL_DAY
+
+
+class ApplicationSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    event_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    event_category: EventCategory
+    host_institution: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    venue_location: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
+    description: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=3000)]
+    event_days: list[SubmissionDay] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def unique_event_dates(self):
+        if len({day.event_date for day in self.event_days}) != len(self.event_days):
+            raise ValueError("Event dates must be distinct.")
+        return self
+
+
+class ApplicationCorrection(ApplicationSubmission):
+    expected_revision: uuid.UUID | None
+
+
+class TutorDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    action: Literal["PREAPPROVE", "REJECT", "REQUEST_CORRECTION"]
+    remarks: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+    expected_revision: uuid.UUID | None
+
+
+class ApplicationSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    application_number: str
+    student_name: str
+    student_roll_number: str
+    tutor_name: str
+    event_name: str
+    event_category: EventCategory
+    venue_location: str
+    start_date: date
+    end_date: date
+    total_days: int
+    status: ApplicationStatus
+
+
+class ApplicationDocumentResponse(BaseModel):
+    id: uuid.UUID
+    document_type: DocumentType
+    filename: str
+
+
+class ApplicationHistoryEntry(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    from_status: ApplicationStatus | None
+    to_status: ApplicationStatus
+    remarks: str | None
+    created_at: datetime
+
+
+class ApplicationDetail(ApplicationSummary):
+    host_institution: str
+    description: str
+    event_days: list[SubmissionDay]
+    documents: list[ApplicationDocumentResponse]
+    history: list[ApplicationHistoryEntry]
+    revision: uuid.UUID | None

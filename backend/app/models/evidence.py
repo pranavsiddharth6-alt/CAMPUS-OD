@@ -94,8 +94,9 @@ class LocationCapture(Base):
     __table_args__ = (
         CheckConstraint("latitude BETWEEN -90 AND 90", name="ck_location_latitude_range"),
         CheckConstraint("longitude BETWEEN -180 AND 180", name="ck_location_longitude_range"),
+        # Maximum finite double, equivalent to the PostgreSQL check and portable to SQLite.
         CheckConstraint(
-            "accuracy_meters >= 0 AND accuracy_meters < 'Infinity'::double precision",
+            "accuracy_meters >= 0 AND accuracy_meters <= 1.7976931348623157e308",
             name="ck_location_accuracy_range",
         ),
     )
