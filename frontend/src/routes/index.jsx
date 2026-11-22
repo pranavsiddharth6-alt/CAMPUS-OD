@@ -17,6 +17,7 @@ import { NewApplicationPage } from '../pages/student/NewApplicationPage';
 import { TutorDashboardPage } from '../pages/tutor/TutorDashboardPage';
 import { TutorApplicationsPage } from '../pages/tutor/TutorApplicationsPage';
 
+import { HODApplicationsPage, HODDashboardPage } from '../pages/hod/HODApplicationsPage';
 import { AdminDashboardPage } from '../pages/admin/AdminDashboardPage';
 import { AdminUsersPage } from '../pages/admin/AdminUsersPage';
 import { AcademicAssignmentsPage } from '../pages/admin/AcademicAssignmentsPage';
@@ -70,6 +71,14 @@ export function AppRoutes() {
         <Route path="dashboard" element={<TutorDashboardPage />} />
         <Route path="applications" element={<TutorApplicationsPage />} />
         <Route path="applications/:applicationId" element={<ApplicationDetailPage tutor />} />
+      </Route>
+
+      <Route path="/hod" element={<ProtectedPortal role="HOD" />}>
+        <Route index element={<Navigate to="/hod/dashboard" replace />} />
+        <Route path="dashboard" element={<HODDashboardPage />} />
+        <Route path="applications" element={<HODApplicationsPage />} />
+        <Route path="history" element={<HODApplicationsPage history />} />
+        <Route path="applications/:applicationId" element={<ApplicationDetailPage hod />} />
       </Route>
 
       {/* Admin Portal Routes */}

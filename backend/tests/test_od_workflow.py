@@ -1,13 +1,15 @@
 import asyncio
 import json
+import sqlite3
 import unittest
 from base64 import b64decode
+from contextlib import closing
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from httpx import ASGITransport, AsyncClient
@@ -18,11 +20,11 @@ from app.api.v1 import od_applications as api
 from app.core.access_tokens import create_access_token
 from app.core.config import settings
 from app.core.passwords import hash_password
-from app.database.demo import DemoSession, create_demo_engine
+from app.database.demo import DemoSession, create_demo_engine, upgrade_demo_hod
 from app.local_demo import initialize_demo, prepare_demo_od
 from app.main import app
-from app.models.academic import ClassTutorAssignment, StudentClassEnrollment
-from app.models.application import ODApplication
+from app.models.academic import ClassTutorAssignment, Department, HODAssignment, StudentClassEnrollment
+from app.models.application import ApplicationStatusHistory, ODApplication
 from app.models.enums import AccountStatus, UserRole
 from app.models.evidence import EvidenceReview, EvidenceSubmission, LocationCapture, StoredFile
 from app.models.user import StudentProfile, TutorProfile, User
@@ -82,8 +84,19 @@ class ODWorkflowTests(unittest.IsolatedAsyncioTestCase):
                                                          designation="Fictional Tutor", department_id=DEMO_TUTOR.department_id))
             admin = User(email="other.admin@example.com", role=UserRole.ADMIN,
                          account_status=AccountStatus.ACTIVE, hashed_password=self.password_hash)
-            db.add_all((student, tutor, other_student, other_tutor, admin))
+            hod = User(email="hod@example.com", role=UserRole.HOD, account_status=AccountStatus.ACTIVE,
+                       hashed_password=self.password_hash)
+            other_hod = User(email="other.hod@example.com", role=UserRole.HOD, account_status=AccountStatus.ACTIVE,
+                             hashed_password=self.password_hash)
+            other_department = Department(code="OTHER", name="Other fictional department")
+            db.add_all((student, tutor, other_student, other_tutor, admin, hod, other_hod, other_department))
             db.flush()
+            db.add_all((
+                HODAssignment(department_id=DEMO_STUDENT.department_id, user_id=hod.id,
+                              full_name="Demo HOD", assigned_by_user_id=admin.id),
+                HODAssignment(department_id=other_department.id, user_id=other_hod.id,
+                              full_name="Other HOD", assigned_by_user_id=admin.id),
+            ))
 
         prepare_demo_od(directory)
         prepare_demo_od(directory)
@@ -96,6 +109,7 @@ class ODWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
         self.student, self.tutor, self.other_student, self.other_tutor = map(bearer, (student, tutor, other_student, other_tutor))
         self.admin = bearer(admin) | {"Origin": DEMO_ORIGIN, "X-CSRF-Protection": "1"}
+        self.hod, self.other_hod = map(bearer, (hod, other_hod))
         self.tutor_id = tutor.id
         self.other_tutor_profile = other_tutor.tutor_profile.id
         self.details = {
@@ -291,8 +305,25 @@ class ODWorkflowTests(unittest.IsolatedAsyncioTestCase):
     def attempt(response, index=0):
         return response.json()["days"][index]["attempts"][-1]
 
+    async def hod_decision(self, application, action, *, remarks="", headers=None):
+        return await self.client.post(f"/api/v1/hod/applications/{application['id']}/decision",
+                                      headers=self.hod if headers is None else headers,
+                                      json={"action": action, "remarks": remarks, "expected_revision": application["revision"]})
+
+    async def pending_hod(self):
+        application, days = await self.preapproved_days()
+        for index, day in enumerate(days):
+            attempt = self.attempt(await self.evidence(application, day), index)
+            result = await self.review_day(application, day, attempt, "APPROVED")
+            self.assertEqual(result.status_code, 200, result.text)
+        url = f"{self.path}/{application['id']}"
+        detail = await self.client.get(url, headers=self.hod)
+        self.assertEqual(detail.status_code, 200, detail.text)
+        return detail.json(), result.json()["days"]
+
     async def test_multi_day_evidence_correction_and_verified_finalization(self):
         application, (first, second) = await self.preapproved_days()
+        self.assertEqual((await self.client.get(f"{self.path}/{application['id']}", headers=self.hod)).status_code, 404)
         first_response = await self.evidence(application, first)
         self.assertEqual(first_response.status_code, 201, first_response.text)
         first_attempt = self.attempt(first_response)
@@ -329,19 +360,146 @@ class ODWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.review_day(application, first, newest, "APPROVED"),
         )
         self.assertEqual(sorted(response.status_code for response in concurrent), [200, 409])
-        finalized = next(response.json() for response in concurrent if response.status_code == 200)
-        self.assertEqual(finalized["status"], "OD_FINALIZED")
-        self.assertEqual([day["state"] for day in finalized["days"]], ["VERIFIED", "VERIFIED"])
+        verified = next(response.json() for response in concurrent if response.status_code == 200)
+        self.assertEqual(verified["status"], "UNDER_HOD_REVIEW")
+        self.assertEqual([day["state"] for day in verified["days"]], ["VERIFIED", "VERIFIED"])
         self.assertEqual((await self.evidence(application, first)).status_code, 409)
         details = (await self.client.get(f"{self.path}/{application['id']}", headers=self.student)).json()
-        self.assertEqual(details["history"][-1]["to_status"], "OD_FINALIZED")
+        self.assertEqual(details["history"][-1]["to_status"], "UNDER_HOD_REVIEW")
+        self.assertEqual((await self.hod_decision(details, "APPROVE", headers=self.tutor)).status_code, 403)
+        self.assertEqual((await self.hod_decision(details, "APPROVE", headers=self.student)).status_code, 403)
+        self.assertEqual((await self.hod_decision(details, "APPROVE", headers=self.other_hod)).status_code, 404)
+        decisions = await asyncio.gather(self.hod_decision(details, "APPROVE"),
+                                         self.hod_decision(details, "APPROVE"))
+        self.assertEqual(sorted(response.status_code for response in decisions), [200, 409])
+        finalized = (await self.client.get(f"{self.path}/{application['id']}", headers=self.student)).json()
+        self.assertEqual(finalized["status"], "OD_FINALIZED")
+        self.assertEqual(finalized["history"][-1]["hod_name"], "Demo HOD")
+        self.assertEqual(sum(entry["to_status"] == "OD_FINALIZED" for entry in finalized["history"]), 1)
         original = next(doc for doc in details["documents"] if doc["document_type"] == "ORIGINAL_SIGNED_OD_FORM")
-        for headers in (self.student, self.tutor):
+        for headers in (self.student, self.tutor, self.hod):
             result = await self.client.get(f"{self.path}/{application['id']}/documents/{original['id']}", headers=headers)
             self.assertEqual(result.content, self.original)
         with self.factory() as db:
             for model in (EvidenceSubmission, LocationCapture, EvidenceReview):
                 self.assertEqual(db.scalar(sa.select(sa.func.count()).select_from(model)), 3)
+
+    async def test_additive_upgrade_preserves_legacy_finalization_and_private_files_after_restart(self):
+        application = await self.create()
+        with self.factory.begin() as db:
+            row = db.get(ODApplication, UUID(application["id"]))
+            row.status = "OD_FINALIZED"
+            row.status_history.append(ApplicationStatusHistory(
+                from_status="UNDER_FINAL_VERIFICATION", to_status="OD_FINALIZED",
+                changed_by_user_id=self.tutor_id, remarks="Legacy tutor finalization.",
+            ))
+        before = (await self.client.get(f"{self.path}/{application['id']}", headers=self.student)).json()
+        # Recreate the two tables with their original columns and constraints in this fixture.
+        with closing(sqlite3.connect(self.directory / "campus_od.sqlite3")) as legacy, legacy:
+            legacy.execute("BEGIN")
+            for table, field in (("application_status_history", "hod_assignment_id"),
+                                 ("od_applications", "department_id")):
+                schema, = legacy.execute("SELECT sql FROM sqlite_master WHERE name = ?", (table,)).fetchone()
+                lines = [line for line in schema.splitlines() if field not in line]
+                lines[-2] = lines[-2].rstrip().removesuffix(",")
+                definition = "\n".join(lines).replace(f"CREATE TABLE {table}", "CREATE TABLE legacy_table", 1)
+                columns = ", ".join(row[1] for row in legacy.execute(f"PRAGMA table_info({table})") if row[1] != field)
+                indexes = [sql for sql, in legacy.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ?", (table,)
+                ) if sql and field not in sql]
+                legacy.execute(definition)
+                legacy.execute(f"INSERT INTO legacy_table ({columns}) SELECT {columns} FROM {table}")
+                legacy.execute(f"DROP TABLE {table}")
+                legacy.execute(f"ALTER TABLE legacy_table RENAME TO {table}")
+                for index in indexes:
+                    legacy.execute(index)
+            legacy.execute("DROP TABLE hod_assignments")
+            legacy.execute("DROP TRIGGER users_revoke_changed_identity_sessions")
+        restarted = create_demo_engine(self.directory)
+        self.addCleanup(restarted.dispose)
+        upgrade_demo_hod(restarted)
+        upgrade_demo_hod(restarted)
+        with restarted.connect() as db:
+            self.assertEqual(db.exec_driver_sql("PRAGMA foreign_key_check").fetchall(), [])
+            self.assertIsNotNone(db.exec_driver_sql("SELECT department_id FROM od_applications").scalar_one())
+        factory = sessionmaker(restarted, class_=DemoSession, expire_on_commit=False)
+        with patch.object(api, "get_session_factory", return_value=factory), patch(
+            "app.dependencies.auth.get_session_factory", return_value=factory,
+        ):
+            base = f"{self.path}/{application['id']}"
+            response = await self.client.get(base, headers=self.student)
+            self.assertEqual(response.json(), before)
+            self.assertEqual(response.json()["status"], "OD_FINALIZED")
+            self.assertIsNone(response.json()["history"][-1]["hod_name"])
+            original = await self.client.get(base + f"/documents/{before['documents'][0]['id']}", headers=self.student)
+            self.assertEqual(original.content, self.original)
+            self.assertEqual((await self.client.get("/api/v1/hod/applications", headers=self.hod)).json(), [])
+
+    async def test_hod_scoped_reads_and_rejection(self):
+        application, days = await self.pending_hod()
+        base = f"{self.path}/{application['id']}"
+        attempt_id = days[0]["attempts"][-1]["id"]
+        for suffix in ("", "/evidence", f"/documents/{application['documents'][0]['id']}",
+                       f"/evidence/{attempt_id}/files/venue-photo"):
+            for headers, expected in ((self.hod, 200), (self.other_hod, 404)):
+                response = await self.client.get(base + suffix, headers=headers)
+                self.assertEqual(response.status_code, expected, response.text)
+        response = await self.client.get(base + f"/evidence/{attempt_id}/files/organizer-proof", headers=self.hod)
+        self.assertEqual(response.content, self.supporting)
+        response = await self.client.get(base + "/evidence", headers=self.hod)
+        self.assertIn("gps", response.json()["days"][0]["attempts"][0])
+        self.assertEqual((await self.client.post(base + "/resubmit", headers=self.hod)).status_code, 403)
+        self.assertEqual((await self.evidence(application, days[0], headers=self.hod)).status_code, 403)
+        self.assertEqual((await self.decision(application, "PREAPPROVE", headers=self.hod)).status_code, 403)
+        self.assertEqual((await self.review_day(application, days[0], {"id": attempt_id}, "APPROVED",
+                                                headers=self.hod)).status_code, 403)
+        self.assertEqual((await self.client.get("/api/v1/hod/applications", headers=self.student)).status_code, 403)
+        self.assertEqual((await self.client.get("/api/v1/hod/applications", headers=self.other_hod)).json(), [])
+        queue = await self.client.get("/api/v1/hod/applications?view=pending", headers=self.hod)
+        self.assertEqual([item["id"] for item in queue.json()], [application["id"]])
+        self.assertEqual((await self.hod_decision(application, "REJECT")).status_code, 422)
+        rejected = await self.hod_decision(application, "REJECT", remarks="The organizer did not confirm.")
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+        self.assertEqual(rejected.json()["status"], "REJECTED")
+        self.assertEqual(rejected.json()["history"][-1]["remarks"], "The organizer did not confirm.")
+        self.assertEqual((await self.hod_decision(application, "APPROVE")).status_code, 409)
+        history = await self.client.get("/api/v1/hod/applications?view=history", headers=self.hod)
+        self.assertEqual([item["id"] for item in history.json()], [application["id"]])
+        counts = await self.client.get("/api/v1/hod/dashboard", headers=self.hod)
+        self.assertEqual(counts.json(), {"pending": 0, "approved": 0, "rejected": 1})
+
+    async def test_hod_correction_requires_tutor_rereview_and_preserves_evidence(self):
+        application, days = await self.pending_hod()
+        base = f"{self.path}/{application['id']}"
+        requested = await self.hod_decision(application, "REQUEST_CORRECTION", remarks="Clarify participation.")
+        self.assertEqual(requested.status_code, 200, requested.text)
+        self.assertEqual(requested.json()["status"], "HOD_CORRECTION_REQUESTED")
+        corrections = self.details | {"description": "Updated participation notes.",
+                                      "expected_revision": requested.json()["revision"]}
+        changed_venue = await self.post(details=corrections | {"venue_location": "A different venue"},
+                                        files=[], path=base + "/resubmit")
+        self.assertEqual(changed_venue.status_code, 422)
+        resubmitted = await self.post(details=corrections, files=[], path=base + "/resubmit")
+        self.assertEqual(resubmitted.status_code, 200, resubmitted.text)
+        correction = resubmitted.json()
+        self.assertEqual(correction["status"], "UNDER_TUTOR_CORRECTION_REVIEW")
+        self.assertEqual((await self.hod_decision(correction, "APPROVE")).status_code, 409)
+        first_attempt = days[0]["attempts"][0]
+        reopen = await self.review_day(application, days[0], first_attempt, "CORRECTION_REQUIRED")
+        self.assertEqual(reopen.status_code, 200, reopen.text)
+        self.assertEqual((await self.decision(correction, "PREAPPROVE")).status_code, 409)
+        self.assertEqual(reopen.json()["days"][1]["state"], "VERIFIED")
+        replaced = await self.evidence(application, days[0])
+        self.assertEqual(replaced.status_code, 201, replaced.text)
+        verified = await self.review_day(application, days[0], self.attempt(replaced), "APPROVED")
+        self.assertEqual(verified.json()["status"], "UNDER_TUTOR_CORRECTION_REVIEW")
+        self.assertEqual(len(verified.json()["days"][0]["attempts"]), 2)
+        self.assertEqual(len(verified.json()["days"][0]["attempts"][0]["reviews"]), 2)
+        forwarded = await self.decision(correction, "PREAPPROVE")
+        self.assertEqual(forwarded.status_code, 200, forwarded.text)
+        self.assertEqual(forwarded.json()["status"], "UNDER_HOD_REVIEW")
+        self.assertEqual((await self.hod_decision(application, "APPROVE")).status_code, 409)
+        self.assertEqual((await self.hod_decision(forwarded.json(), "APPROVE")).status_code, 200)
 
     async def test_evidence_requires_preapproval_both_files_and_valid_gps(self):
         application = await self.create()

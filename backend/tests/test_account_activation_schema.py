@@ -140,9 +140,27 @@ class AccountActivationMigrationTests(unittest.TestCase):
             command_method(cls.config(output), revisions, sql=True)
         return " ".join(output.getvalue().split())
 
+    def test_hod_revision_is_additive_and_restricts_client_access_offline(self):
+        scripts = ScriptDirectory.from_config(self.config())
+        hod_revision = scripts.get_revision("0004_hod_approval")
+        self.assertEqual(hod_revision.down_revision, self.revision)
+        sql = self.render(command.upgrade, f"{self.revision}:{hod_revision.revision}")
+        for statement in (
+            "ADD VALUE IF NOT EXISTS 'HOD'",
+            "ADD VALUE IF NOT EXISTS 'UNDER_HOD_REVIEW'",
+            "CREATE UNIQUE INDEX uq_hod_active_department",
+            "CREATE UNIQUE INDEX uq_hod_active_user",
+            "ALTER TABLE public.hod_assignments ENABLE ROW LEVEL SECURITY",
+            "REVOKE ALL PRIVILEGES ON TABLE public.hod_assignments FROM PUBLIC",
+            "ARRAY['anon', 'authenticated', 'service_role']",
+            "CREATE TRIGGER users_revoke_changed_identity_sessions",
+        ):
+            self.assertIn(statement, sql)
+        self.assertNotIn("DROP TABLE", sql)
+        self.assertNotIn("UPDATE public.application_status_history", sql)
+
     def test_revision_and_backfill_preserve_legacy_account_state(self):
         scripts = ScriptDirectory.from_config(self.config())
-        self.assertEqual(scripts.get_current_head(), self.revision)
         self.assertEqual(scripts.get_revision(self.revision).down_revision, self.parent)
         steps = (
             "CREATE TYPE public.account_status_enum AS ENUM ('PENDING_ACTIVATION', 'ACTIVE', 'DISABLED')",

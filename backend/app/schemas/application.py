@@ -109,6 +109,20 @@ class TutorDecision(BaseModel):
     expected_revision: uuid.UUID | None
 
 
+class HODDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    action: Literal["APPROVE", "REJECT", "REQUEST_CORRECTION"]
+    remarks: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] = ""
+    expected_revision: uuid.UUID
+
+    @model_validator(mode="after")
+    def require_remarks(self):
+        if self.action != "APPROVE" and not self.remarks:
+            raise ValueError("Remarks are required for rejection and correction.")
+        return self
+
+
 class ApplicationSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -135,10 +149,12 @@ class ApplicationDocumentResponse(BaseModel):
 class ApplicationHistoryEntry(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
+    id: uuid.UUID
     from_status: ApplicationStatus | None
     to_status: ApplicationStatus
     remarks: str | None
     created_at: datetime
+    hod_name: str | None = None
 
 
 class ApplicationDetail(ApplicationSummary):

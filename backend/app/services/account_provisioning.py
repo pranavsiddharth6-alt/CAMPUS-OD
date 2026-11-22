@@ -14,11 +14,13 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
-from app.models.academic import AcademicYear, Class, Department, StudentClassEnrollment
+from app.models.academic import AcademicYear, Class, Department, HODAssignment, StudentClassEnrollment
 from app.models.enums import AccountActionPurpose, AccountStatus, UserRole
 from app.models.user import AccountActionToken, StudentProfile, TutorProfile, User
 from app.schemas.provisioning import (
+    ApprovedHODRecord,
     ApprovedStudentRecord,
+    HODProvisioningRequest,
     ApprovedTutorRecord,
     StudentProvisioningRequest,
     TutorProvisioningRequest,
@@ -26,12 +28,16 @@ from app.schemas.provisioning import (
 
 _IDENTITY_UNIQUE_INDEXES = {
     "ix_users_email",
+    "uq_hod_active_department",
+    "uq_hod_active_user",
     "ix_student_profiles_roll_number",
     "ix_student_profiles_register_number",
     "ix_tutor_profiles_staff_id",
 }
 _SQLITE_IDENTITY_CONFLICTS = {
     "UNIQUE constraint failed: users.email",
+    "UNIQUE constraint failed: hod_assignments.department_id",
+    "UNIQUE constraint failed: hod_assignments.user_id",
     "UNIQUE constraint failed: student_profiles.roll_number",
     "UNIQUE constraint failed: student_profiles.register_number",
     "UNIQUE constraint failed: tutor_profiles.staff_id",
@@ -175,8 +181,33 @@ class AccountProvisioningService:
         self._handoff(account, invitation)
         return account
 
+    def provision_hod(
+        self, request: HODProvisioningRequest, *, approved: ApprovedHODRecord, administrator_id: UUID,
+    ) -> ProvisionedAccount:
+        if not isinstance(approved, ApprovedHODRecord) or request.model_dump() != approved.model_dump():
+            raise ProvisioningValidationError("HOD details do not match the approved staff record.")
+        with self._transaction() as db:
+            administrator = db.scalar(select(User.id).where(
+                User.id == administrator_id, User.role == UserRole.ADMIN, User.account_status == AccountStatus.ACTIVE,
+            ).with_for_update(read=True))
+            if administrator is None:
+                raise ProvisioningValidationError("An active administrator is required to provision a HOD.")
+            if db.get(Department, request.department_id) is None:
+                raise ProvisioningValidationError("The approved department does not exist.")
+            user = User(email=request.email, role=UserRole.HOD,
+                        account_status=AccountStatus.PENDING_ACTIVATION, auth_version=0)
+            db.add(user)
+            db.flush()
+            assignment = HODAssignment(user_id=user.id, department_id=request.department_id,
+                                       full_name=request.full_name, assigned_by_user_id=administrator_id)
+            db.add(assignment)
+            account, invitation = self._stage_invitation(db, user, assignment)
+
+        self._handoff(account, invitation)
+        return account
+
     def _stage_invitation(
-        self, db: Session, user: User, profile: StudentProfile | TutorProfile,
+        self, db: Session, user: User, profile: StudentProfile | TutorProfile | HODAssignment,
     ) -> tuple[ProvisionedAccount, ActivationInvitation]:
         now = datetime.now(timezone.utc)
         token = token_urlsafe(32)

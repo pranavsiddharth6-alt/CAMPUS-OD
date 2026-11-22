@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import React, { useRef, useState } from 'react';
+import { Link, useLocation, useParams } from 'react-router-dom';
 import { Download } from 'lucide-react';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
@@ -7,7 +7,7 @@ import { Card } from '../components/ui/Card';
 import { Select } from '../components/ui/Select';
 import { EvidencePanel } from '../components/od/EvidencePanel';
 import { API_ENDPOINTS, apiClient } from '../services/api';
-import { downloadODFile, evidenceOpen, odError, reviewable, statusLabel, statusVariant, useODResource } from '../services/od';
+import { correctionRequested, downloadODFile, evidenceOpen, odError, reviewable, statusLabel, statusVariant, useODResource, viewODFile } from '../services/od';
 
 const documentLabels = {
   ORIGINAL_SIGNED_OD_FORM: 'Original signed OD form',
@@ -20,21 +20,31 @@ const decisions = [
   { value: 'REQUEST_CORRECTION', label: 'Request correction' },
 ];
 
-export function ApplicationDetailPage({ tutor = false }) {
+const hodDecisions = [{ value: 'APPROVE', label: 'Approve and finalize OD' }, ...decisions.slice(1)];
+
+export function ApplicationDetailPage({ tutor = false, hod = false }) {
   const { applicationId } = useParams();
   const { data: app, error, reload } = useODResource(API_ENDPOINTS.APPLICATIONS.DETAIL(applicationId));
   const [action, setAction] = useState('');
   const [remarks, setRemarks] = useState('');
   const [saving, setSaving] = useState(false);
   const [actionError, setActionError] = useState('');
-  const base = tutor ? '/tutor/applications' : '/student/applications';
+  const dialog = useRef(null);
+  const { state } = useLocation();
+  const base = hod ? '/hod/applications' : tutor ? '/tutor/applications' : '/student/applications';
+  const back = hod && (state?.history || (app && app.status !== 'UNDER_HOD_REVIEW')) ? '/hod/history' : base;
+  const tutorDecisions = app?.status === 'UNDER_TUTOR_CORRECTION_REVIEW'
+    ? [{ value: 'PREAPPROVE', label: 'Forward correction to HOD' }, ...decisions.slice(1)]
+    : decisions;
 
-  async function download(document) {
+  async function openDocument(document, preview = false) {
     setActionError('');
+    const endpoint = API_ENDPOINTS.APPLICATIONS.DOCUMENT(applicationId, document.id);
     try {
-      await downloadODFile(API_ENDPOINTS.APPLICATIONS.DOCUMENT(applicationId, document.id), document.filename);
+      if (preview) await viewODFile(endpoint);
+      else await downloadODFile(endpoint, document.filename);
     } catch (failure) {
-      setActionError(odError(failure, 'The document could not be downloaded.'));
+      setActionError(odError(failure, preview ? 'The document preview could not be opened.' : 'The document could not be downloaded.'));
     }
   }
 
@@ -43,9 +53,10 @@ export function ApplicationDetailPage({ tutor = false }) {
     setSaving(true);
     setActionError('');
     try {
-      await apiClient(API_ENDPOINTS.TUTOR.DECISION(applicationId), {
+      await apiClient((hod ? API_ENDPOINTS.HOD : API_ENDPOINTS.TUTOR).DECISION(applicationId), {
         method: 'POST', body: JSON.stringify({ action, remarks, expected_revision: app.revision }),
       });
+      dialog.current?.close();
       setAction('');
       setRemarks('');
       reload();
@@ -59,7 +70,7 @@ export function ApplicationDetailPage({ tutor = false }) {
   return (
     <div className="max-w-4xl space-y-5">
       <div className="flex justify-between gap-3">
-        <Link className="text-sm text-brand-primary underline" to={base}>Back to applications</Link>
+        <Link className="text-sm text-brand-primary underline" to={back}>{back === '/hod/history' ? 'Back to decision history' : 'Back to applications'}</Link>
         <Button variant="secondary" size="sm" onClick={() => { setActionError(''); reload(); }}>Refresh</Button>
       </div>
       {error && <p role="alert" className="text-sm text-rose-700">{error}</p>}
@@ -80,6 +91,9 @@ export function ApplicationDetailPage({ tutor = false }) {
               <div><dt className="text-xs text-brand-muted">Assigned tutor</dt><dd>{app.tutor_name}</dd></div>
               <div><dt className="text-xs text-brand-muted">Host</dt><dd>{app.host_institution}</dd></div>
               <div><dt className="text-xs text-brand-muted">Venue</dt><dd>{app.venue_location}</dd></div>
+              <div><dt className="text-xs text-brand-muted">Event category</dt>
+                <dd className="capitalize">{app.event_category.replaceAll('_', ' ').toLowerCase()}</dd>
+              </div>
               <div className="sm:col-span-2"><dt className="text-xs text-brand-muted">Event dates</dt>
                 <dd>{app.event_days.map((day) => `${day.event_date} (${day.session.replaceAll('_', ' ').toLowerCase()})`).join(', ')}</dd>
               </div>
@@ -97,7 +111,10 @@ export function ApplicationDetailPage({ tutor = false }) {
                       <div>{documentLabels[doc.document_type] ?? 'Supporting document'}</div>
                       <div className="text-xs text-brand-muted">{doc.filename}</div>
                     </div>
-                    <Button size="sm" variant="secondary" icon={Download} onClick={() => download(doc)}>Download</Button>
+                    <div className="flex flex-wrap gap-2">
+                      {hod && <Button size="sm" variant="secondary" onClick={() => openDocument(doc, true)}>View</Button>}
+                      <Button size="sm" variant="secondary" icon={Download} onClick={() => openDocument(doc)}>Download</Button>
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -107,8 +124,15 @@ export function ApplicationDetailPage({ tutor = false }) {
             {app.history.length ? (
               <ol className="space-y-3">
                 {app.history.map((entry) => (
-                  <li key={entry.created_at} className="border-l-2 border-brand-border pl-3">
-                    <p className="text-sm font-medium">{statusLabel(entry.to_status)}</p>
+                  <li key={entry.id} className="border-l-2 border-brand-border pl-3">
+                    <p className="text-sm font-medium">
+                      {entry.hod_name ? ({
+                        OD_FINALIZED: 'HOD approved and finalized OD',
+                        REJECTED: 'HOD rejected the application',
+                        HOD_CORRECTION_REQUESTED: 'HOD requested correction',
+                      }[entry.to_status]) : statusLabel(entry.to_status)}
+                    </p>
+                    {entry.hod_name && <p className="text-xs text-brand-muted">{entry.hod_name}</p>}
                     <p className="text-xs text-brand-muted">{new Date(entry.created_at.endsWith('Z') || /[+-]\d\d:\d\d$/.test(entry.created_at)
                       ? entry.created_at : `${entry.created_at}Z`).toLocaleString()}</p>
                     {entry.remarks && <p className="mt-1 whitespace-pre-wrap break-words text-sm">{entry.remarks}</p>}
@@ -117,17 +141,47 @@ export function ApplicationDetailPage({ tutor = false }) {
               </ol>
             ) : <p className="text-sm text-brand-muted">No status changes recorded.</p>}
           </Card>
-          {(evidenceOpen.has(app.status) || ['OD_FINALIZED', 'REJECTED'].includes(app.status)) && (
-            <EvidencePanel key={app.id} applicationId={app.id} tutor={tutor} onChange={reload} />
+          {app.status === 'UNDER_HOD_REVIEW' && !hod && (
+            <p className="text-sm text-brand-muted">The tutor verified all event days. The application is awaiting the department HOD’s decision.</p>
           )}
-          {!tutor && app.status === 'CORRECTION_REQUESTED' && (
+          {(evidenceOpen.has(app.status) || ['UNDER_HOD_REVIEW', 'HOD_CORRECTION_REQUESTED', 'OD_FINALIZED', 'REJECTED'].includes(app.status)) && (
+            <EvidencePanel key={app.id} applicationId={app.id} tutor={tutor} readOnly={hod} onChange={reload} />
+          )}
+          {!tutor && !hod && correctionRequested.has(app.status) && (
             <Link className="inline-block rounded-md bg-brand-primary px-4 py-2 text-sm text-white"
               to={`${base}/${app.id}/correct`}>Correct and resubmit</Link>
+          )}
+          {hod && app.status === 'UNDER_HOD_REVIEW' && (
+            <Card title="HOD decision">
+              <Button onClick={() => { setActionError(''); dialog.current.showModal(); }}>Record decision</Button>
+              <dialog ref={dialog} aria-labelledby="hod-decision-title"
+                className="w-[calc(100%-2rem)] max-w-lg rounded-lg border border-brand-border p-6 backdrop:bg-slate-900/50"
+                onCancel={(event) => { if (saving) event.preventDefault(); }}>
+                <form className="space-y-4" onSubmit={decide}>
+                  <h2 id="hod-decision-title" className="font-semibold text-brand-dark">Record HOD decision</h2>
+                  <Select label="Decision" required options={hodDecisions} value={action}
+                    onChange={(event) => setAction(event.target.value)} />
+                  <div className="space-y-1">
+                    <label className="block text-xs font-medium" htmlFor="hod-remarks">
+                      {action === 'APPROVE' ? 'Remarks (optional)' : 'Remarks (required for rejection or correction)'}
+                    </label>
+                    <textarea id="hod-remarks" rows={4} maxLength={2000} required={action !== 'APPROVE'}
+                      value={remarks} className="block w-full rounded-md border border-slate-300 p-2 text-sm"
+                      onChange={(event) => setRemarks(event.target.value)} />
+                  </div>
+                  {actionError && <p role="alert" className="text-sm text-rose-700">{actionError}</p>}
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <Button variant="secondary" disabled={saving} onClick={() => dialog.current.close()}>Cancel</Button>
+                    <Button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save decision'}</Button>
+                  </div>
+                </form>
+              </dialog>
+            </Card>
           )}
           {tutor && reviewable.has(app.status) && (
             <Card title="Tutor decision">
               <form className="space-y-3" onSubmit={decide}>
-                <Select label="Decision" required options={decisions} value={action}
+                <Select label="Decision" required options={tutorDecisions} value={action}
                   onChange={(event) => setAction(event.target.value)} />
                 <label className="block text-xs font-medium" htmlFor="review-remarks">Remarks</label>
                 <textarea id="review-remarks" rows={3} maxLength={2000} required value={remarks}

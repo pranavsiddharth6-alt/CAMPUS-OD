@@ -6,7 +6,7 @@ import { Input } from '../ui/Input';
 import { Select } from '../ui/Select';
 import { API_ENDPOINTS, apiClient } from '../../services/api';
 import { captureLocation } from '../../services/location';
-import { downloadODFile, evidenceOpen, odError, useODResource } from '../../services/od';
+import { downloadODFile, evidenceOpen, odError, useODResource, viewODFile } from '../../services/od';
 
 const states = {
   NOT_SUBMITTED: ['Evidence needed', 'neutral'],
@@ -89,8 +89,8 @@ function EvidenceForm({ applicationId, day, onSave }) {
   );
 }
 
-function EvidenceReviewForm({ applicationId, day, attempt, onSave }) {
-  const [decision, setDecision] = useState('');
+function EvidenceReviewForm({ applicationId, day, attempt, onSave, reopen = false }) {
+  const [decision, setDecision] = useState(reopen ? 'CORRECTION_REQUIRED' : '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -113,23 +113,25 @@ function EvidenceReviewForm({ applicationId, day, attempt, onSave }) {
 
   return (
     <form className="space-y-3 border-t border-brand-border pt-3" onSubmit={review}>
-      <Select id={`evidence-decision-${day.id}`} label="Evidence decision" required options={decisions}
-        value={decision} onChange={(event) => setDecision(event.target.value)} />
+      {!reopen && <Select id={`evidence-decision-${day.id}`} label="Evidence decision" required options={decisions}
+        value={decision} onChange={(event) => setDecision(event.target.value)} />}
       <Input id={`evidence-remarks-${day.id}`} label="Evidence review remarks" name="remarks" maxLength={2000} required />
       {error && <p role="alert" className="text-xs text-rose-700">{error}</p>}
-      <Button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save evidence review'}</Button>
+      <Button type="submit" disabled={saving}>{saving ? 'Saving…' : reopen ? 'Request new evidence for this day' : 'Save evidence review'}</Button>
     </form>
   );
 }
 
-function EvidenceAttempt({ attempt, applicationId }) {
+function EvidenceAttempt({ attempt, applicationId, readOnly }) {
   const [error, setError] = useState('');
-  async function download(kind, file) {
+  async function openFile(kind, file, preview = false) {
     setError('');
+    const endpoint = API_ENDPOINTS.APPLICATIONS.EVIDENCE_FILE(applicationId, attempt.id, kind);
     try {
-      await downloadODFile(API_ENDPOINTS.APPLICATIONS.EVIDENCE_FILE(applicationId, attempt.id, kind), file.filename);
+      if (preview) await viewODFile(endpoint);
+      else await downloadODFile(endpoint, file.filename);
     } catch (failure) {
-      setError(odError(failure, 'The evidence file could not be downloaded.'));
+      setError(odError(failure, preview ? 'The evidence preview could not be opened.' : 'The evidence file could not be downloaded.'));
     }
   }
   return (
@@ -138,10 +140,15 @@ function EvidenceAttempt({ attempt, applicationId }) {
       {attempt.gps && <GPSDetails gps={attempt.gps} />}
       {attempt.notes && <p className="break-words text-sm">{attempt.notes}</p>}
       <div className="flex flex-wrap gap-2">
-        {attempt.venue_photo && <Button size="sm" variant="secondary"
-          onClick={() => download('venue-photo', attempt.venue_photo)}>Download venue photo</Button>}
-        {attempt.organizer_proof && <Button size="sm" variant="secondary"
-          onClick={() => download('organizer-proof', attempt.organizer_proof)}>Download organizer proof</Button>}
+        {[
+          ['venue-photo', 'venue photo', attempt.venue_photo],
+          ['organizer-proof', 'organizer proof', attempt.organizer_proof],
+        ].map(([kind, label, file]) => file && (
+          <div key={kind} className="flex flex-wrap gap-2">
+            {readOnly && <Button size="sm" variant="secondary" onClick={() => openFile(kind, file, true)}>View {label}</Button>}
+            <Button size="sm" variant="secondary" onClick={() => openFile(kind, file)}>Download {label}</Button>
+          </div>
+        ))}
       </div>
       {error && <p role="alert" className="text-xs text-rose-700">{error}</p>}
       {attempt.reviews.map((review) => (
@@ -155,7 +162,7 @@ function EvidenceAttempt({ attempt, applicationId }) {
   );
 }
 
-export function EvidencePanel({ applicationId, tutor, onChange }) {
+export function EvidencePanel({ applicationId, tutor, readOnly, onChange }) {
   const { data, error, reload } = useODResource(API_ENDPOINTS.APPLICATIONS.EVIDENCE(applicationId));
   if (error) return <p role="alert" className="text-sm text-rose-700">{error}</p>;
   if (!data) return <p role="status" className="text-sm">Loading evidence…</p>;
@@ -171,6 +178,9 @@ export function EvidencePanel({ applicationId, tutor, onChange }) {
         <Button size="sm" variant="secondary" onClick={saved}>Refresh evidence</Button>
       </div>
       <p className="text-xs text-brand-muted">GPS and photo watermarks are supporting evidence and can be spoofed.</p>
+      {data.status === 'UNDER_TUTOR_CORRECTION_REVIEW' && tutor && (
+        <p className="text-sm text-brand-muted">Keep verified evidence where it still applies. Request new evidence for any day that needs it before forwarding the correction.</p>
+      )}
       {data.days.some((day) => day.state === 'REJECTED') && (
         <p className="text-xs text-rose-700">A rejected event day prevents finalization.</p>
       )}
@@ -180,17 +190,23 @@ export function EvidencePanel({ applicationId, tutor, onChange }) {
         return (
           <article key={day.id} aria-label={`Event day ${day.event_date}`}>
             <Card title={day.event_date} action={<Badge variant={variant}>{label}</Badge>} bodyClassName="space-y-3">
-              {latest && <EvidenceAttempt key={`attempt-${latest.id}`} attempt={latest} applicationId={applicationId} />}
+              {latest && <EvidenceAttempt key={`attempt-${latest.id}`} attempt={latest} applicationId={applicationId} readOnly={readOnly} />}
               {day.attempts.length > 1 && (
                 <details className="space-y-2 text-sm">
                   <summary className="cursor-pointer">Earlier submissions ({day.attempts.length - 1})</summary>
                   {day.attempts.slice(0, -1).map((attempt) => (
-                    <EvidenceAttempt key={attempt.id} attempt={attempt} applicationId={applicationId} />
+                    <EvidenceAttempt key={attempt.id} attempt={attempt} applicationId={applicationId} readOnly={readOnly} />
                   ))}
                 </details>
               )}
-              {evidenceOpen.has(data.status) && !tutor && ['NOT_SUBMITTED', 'CORRECTION_REQUIRED'].includes(day.state) && (
+              {evidenceOpen.has(data.status) && !tutor && !readOnly && ['NOT_SUBMITTED', 'CORRECTION_REQUIRED'].includes(day.state) && (
                 <EvidenceForm key={`upload-${latest?.id ?? day.id}`} applicationId={applicationId} day={day} onSave={saved} />
+              )}
+              {data.status === 'UNDER_TUTOR_CORRECTION_REVIEW' && tutor && day.state === 'VERIFIED' && (
+                <details className="text-sm">
+                  <summary className="cursor-pointer">Reopen this day for correction</summary>
+                  <EvidenceReviewForm applicationId={applicationId} day={day} attempt={latest} onSave={saved} reopen />
+                </details>
               )}
               {evidenceOpen.has(data.status) && tutor && day.state === 'AWAITING_REVIEW' && (
                 <EvidenceReviewForm key={`review-${latest.id}`} applicationId={applicationId} day={day} attempt={latest} onSave={saved} />

@@ -1,6 +1,7 @@
 """Administrator-only provisioning against the fictional local roster."""
 
 from pathlib import Path
+from uuid import UUID
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -10,15 +11,15 @@ from starlette.concurrency import run_in_threadpool
 from app.api.v1.auth import _COOKIE_AUTH_GUARDS, _NO_STORE, read_auth_json
 from app.core.config import settings
 from app.database.session import get_session_factory
-from app.dependencies.auth import require_roles
+from app.dependencies.auth import AuthenticatedUser, require_roles
 from app.models.enums import UserRole
 from app.schemas.provisioning import (
-    DemoRosterResponse, ProvisioningResponse, StudentProvisioningRequest, TutorProvisioningRequest,
+    DemoRosterResponse, HODProvisioningRequest, ProvisioningResponse, StudentProvisioningRequest, TutorProvisioningRequest,
 )
 from app.services.account_provisioning import (
     AccountProvisioningService, InvitationDeliveryError, ProvisioningConflictError, ProvisioningValidationError,
 )
-from app.services.demo_accounts import DEMO_STUDENT, DEMO_TUTOR, DemoInvitationOutbox
+from app.services.demo_accounts import DEMO_HOD, DEMO_STUDENT, DEMO_TUTOR, DemoInvitationOutbox
 
 
 async def local_demo_directory(request: Request) -> Path:
@@ -35,23 +36,29 @@ async def local_demo_directory(request: Request) -> Path:
 _admin = APIRouter(prefix="/admin", tags=["Local demo administration"],
                    dependencies=[Depends(require_roles(UserRole.ADMIN))])
 DemoDirectory = Annotated[Path, Depends(local_demo_directory)]
+Admin = Annotated[AuthenticatedUser, Depends(require_roles(UserRole.ADMIN))]
 
 
 @_admin.get("/demo-roster", response_model=DemoRosterResponse, dependencies=[Depends(local_demo_directory)])
 async def demo_roster(response: Response) -> DemoRosterResponse:
     response.headers.update(_NO_STORE)
-    return DemoRosterResponse(students=[DEMO_STUDENT], tutors=[DEMO_TUTOR])
+    return DemoRosterResponse(students=[DEMO_STUDENT], tutors=[DEMO_TUTOR], hods=[DEMO_HOD])
 
 
-def _provision(directory: Path, request: StudentProvisioningRequest | TutorProvisioningRequest) -> ProvisioningResponse:
+def _provision(
+    directory: Path, request: StudentProvisioningRequest | TutorProvisioningRequest | HODProvisioningRequest,
+    administrator_id: UUID | None = None,
+) -> ProvisioningResponse:
     try:
         service = AccountProvisioningService(
             session_factory=get_session_factory(), deliver_invitation=DemoInvitationOutbox(directory),
         )
         if isinstance(request, StudentProvisioningRequest):
             account = service.provision_student(request, approved=DEMO_STUDENT)
-        else:
+        elif isinstance(request, TutorProvisioningRequest):
             account = service.provision_tutor(request, approved=DEMO_TUTOR)
+        else:
+            account = service.provision_hod(request, approved=DEMO_HOD, administrator_id=administrator_id)
         delivered = True
     except InvitationDeliveryError as error:
         account = error.account
@@ -84,6 +91,15 @@ async def provision_tutor(request: Request, response: Response, directory: DemoD
         raise HTTPException(400, "Invalid tutor provisioning request.", headers=_NO_STORE)
     response.headers.update(_NO_STORE)
     return await run_in_threadpool(_provision, directory, data)
+
+
+@_admin.post("/hods", status_code=201, dependencies=_COOKIE_AUTH_GUARDS)
+async def provision_hod(request: Request, response: Response, directory: DemoDirectory, admin: Admin) -> ProvisioningResponse:
+    data = await read_auth_json(request, HODProvisioningRequest)
+    if data is None:
+        raise HTTPException(400, "Invalid HOD provisioning request.", headers=_NO_STORE)
+    response.headers.update(_NO_STORE)
+    return await run_in_threadpool(_provision, directory, data, admin.user_id)
 
 
 admin_provisioning_router = _admin

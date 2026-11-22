@@ -2,18 +2,19 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload, sessionmaker
 
 from app.dependencies.auth import AuthenticatedUser
-from app.models.academic import AcademicYear, Class, ClassTutorAssignment, StudentClassEnrollment
+from app.models.academic import AcademicYear, Class, ClassTutorAssignment, HODAssignment, StudentClassEnrollment
 from app.models.application import ApplicationStatusHistory, EventDay, ODApplication
 from app.models.enums import AccountStatus, ApplicationStatus, DaySession, DocumentType, UserRole
 from app.models.evidence import ApplicationDocument, StoredFile
-from app.models.user import StudentProfile, TutorProfile, User
+from app.models.user import AuthSession, StudentProfile, TutorProfile, User
 from app.schemas.application import (
     ApplicationCorrection, ApplicationDetail, ApplicationDocumentResponse, ApplicationSubmission,
     ApplicationSummary, SubmissionDay, TutorDecision,
@@ -21,7 +22,10 @@ from app.schemas.application import (
 from app.services.storage import LocalStorageService
 from app.services.private_uploads import ApplicationError, PrivateUpload, read_upload, store_upload, write_with_uploads
 
-_REVIEWABLE = {ApplicationStatus.SUBMITTED, ApplicationStatus.UNDER_TUTOR_REVIEW}
+_REVIEWABLE = {
+    ApplicationStatus.SUBMITTED, ApplicationStatus.UNDER_TUTOR_REVIEW,
+    ApplicationStatus.UNDER_TUTOR_CORRECTION_REVIEW,
+}
 _DECISIONS = {
     "PREAPPROVE": ApplicationStatus.PRE_APPROVED,
     "REJECT": ApplicationStatus.REJECTED,
@@ -39,13 +43,17 @@ def _history(app: ODApplication) -> list[ApplicationStatusHistory]:
     return sorted(app.status_history, key=lambda entry: (entry.created_at, entry.id))
 
 
-def _transition(app: ODApplication, status: ApplicationStatus, user: AuthenticatedUser, remarks: str | None = None):
+def _transition(
+    app: ODApplication, status: ApplicationStatus, user: AuthenticatedUser, remarks: str | None = None,
+    *, hod_assignment_id: UUID | None = None,
+):
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     history = _history(app)
     if history:
         now = max(now, history[-1].created_at + timedelta(microseconds=1))
     app.status_history.append(ApplicationStatusHistory(
-        from_status=app.status, to_status=status, changed_by_user_id=user.user_id, remarks=remarks, created_at=now,
+        from_status=app.status, to_status=status, changed_by_user_id=user.user_id,
+        remarks=remarks, created_at=now, hod_assignment_id=hod_assignment_id,
     ))
     app.status = status
 
@@ -97,18 +105,39 @@ def _detail(app: ODApplication) -> ApplicationDetail:
     )
 
 
-def _scope(user: AuthenticatedUser):
+def _active_hod_assignment(user: AuthenticatedUser):
+    return (
+        select(HODAssignment.id)
+        .join(User, User.id == HODAssignment.user_id)
+        .join(AuthSession, AuthSession.user_id == User.id)
+        .where(HODAssignment.user_id == user.user_id, HODAssignment.ended_at.is_(None),
+               User.role == UserRole.HOD, User.account_status == AccountStatus.ACTIVE,
+               AuthSession.id == user.session_id, AuthSession.revoked_at.is_(None),
+               AuthSession.expires_at > datetime.now(timezone.utc).replace(tzinfo=None))
+    )
+
+
+def _scope(user: AuthenticatedUser, *, hod_review_only: bool = True):
     if user.role == UserRole.STUDENT:
         return ODApplication.student.has(StudentProfile.user_id == user.user_id)
     if user.role == UserRole.TUTOR:
         return ODApplication.assigned_tutor.has(TutorProfile.user_id == user.user_id)
+    if user.role == UserRole.HOD:
+        assignment = _active_hod_assignment(user).where(HODAssignment.department_id == ODApplication.department_id)
+        if not hod_review_only:
+            return assignment.exists()
+        return assignment.exists() & or_(
+            ODApplication.status == ApplicationStatus.UNDER_HOD_REVIEW,
+            ODApplication.status_history.any(ApplicationStatusHistory.hod_assignment_id.is_not(None)),
+        )
     raise ApplicationError(403, "Insufficient permissions.")
 
 
 def _load(db: Session, application_id: UUID, user: AuthenticatedUser, *, lock: bool = False) -> ODApplication:
     query = select(ODApplication).where(ODApplication.id == application_id, _scope(user)).options(
         selectinload(ODApplication.student), selectinload(ODApplication.assigned_tutor),
-        selectinload(ODApplication.event_days), selectinload(ODApplication.status_history),
+        selectinload(ODApplication.event_days),
+        selectinload(ODApplication.status_history).joinedload(ApplicationStatusHistory.hod_assignment),
         selectinload(ODApplication.documents).joinedload(ApplicationDocument.stored_file),
     )
     app = db.scalar(query.with_for_update() if lock else query)
@@ -173,7 +202,8 @@ class ODApplicationService:
             raise ApplicationError(422, "One original signed OD form is required.")
         with write_with_uploads(self._sessions, self._storage) as (db, keys):
             student, tutor = _resolve_assignment(db, user)
-            app = ODApplication(application_number=f"OD-{uuid4().hex.upper()}", student=student, assigned_tutor=tutor)
+            app = ODApplication(application_number=f"OD-{uuid4().hex.upper()}", student=student,
+                                assigned_tutor=tutor, department_id=student.department_id)
             _update_event(db, app, submission)
             _transition(app, ApplicationStatus.SUBMITTED, user)
             self._attach(app, files, user, keys)
@@ -181,12 +211,38 @@ class ODApplicationService:
             db.flush()
             return _detail(app)
 
-    def list_applications(self, user: AuthenticatedUser) -> list[ApplicationSummary]:
+    def list_applications(
+        self, user: AuthenticatedUser, *, view: Literal["pending", "history"] | None = None,
+    ) -> list[ApplicationSummary]:
+        query = select(ODApplication).where(_scope(user))
+        if view == "pending":
+            query = query.where(ODApplication.status == ApplicationStatus.UNDER_HOD_REVIEW)
+        elif view == "history":
+            query = query.where(ODApplication.status_history.any(ApplicationStatusHistory.hod_assignment_id.is_not(None)))
         with self._sessions() as db:
-            apps = db.scalars(select(ODApplication).where(_scope(user)).options(
+            apps = db.scalars(query.options(
                 joinedload(ODApplication.student), joinedload(ODApplication.assigned_tutor),
             ).order_by(ODApplication.created_at.desc(), ODApplication.id)).all()
             return [_summary(app) for app in apps]
+
+    def hod_counts(self, user: AuthenticatedUser) -> dict[str, int]:
+        if user.role != UserRole.HOD:
+            raise ApplicationError(403, "Insufficient permissions.")
+        hod_rejected = ODApplication.status_history.any(
+            ApplicationStatusHistory.hod_assignment_id.is_not(None)
+            & (ApplicationStatusHistory.to_status == ApplicationStatus.REJECTED)
+        )
+        with self._sessions() as db:
+            counts = dict(db.execute(
+                select(ODApplication.status, func.count()).where(
+                    _scope(user), or_(ODApplication.status != ApplicationStatus.REJECTED, hod_rejected),
+                ).group_by(ODApplication.status)
+            ).all())
+        return {
+            "pending": counts.get(ApplicationStatus.UNDER_HOD_REVIEW, 0),
+            "approved": counts.get(ApplicationStatus.OD_FINALIZED, 0),
+            "rejected": counts.get(ApplicationStatus.REJECTED, 0),
+        }
 
     def detail(self, user: AuthenticatedUser, application_id: UUID) -> ApplicationDetail:
         with self._sessions() as db:
@@ -202,10 +258,22 @@ class ODApplicationService:
         with write_with_uploads(self._sessions, self._storage) as (db, keys):
             app = _load(db, application_id, user, lock=True)
             _check_revision(app, correction.expected_revision)
-            if app.status != ApplicationStatus.CORRECTION_REQUESTED:
+            is_hod_correction = app.status == ApplicationStatus.HOD_CORRECTION_REQUESTED
+            if not is_hod_correction and app.status != ApplicationStatus.CORRECTION_REQUESTED:
                 raise ApplicationError(409, "Only applications with requested corrections can be resubmitted.")
-            _update_event(db, app, correction)
-            _transition(app, ApplicationStatus.SUBMITTED, user, "Student resubmitted the application.")
+            if is_hod_correction:
+                # Existing evidence is tied to this event, venue and schedule.
+                fixed_fields = ("event_name", "event_category", "host_institution", "venue_location")
+                if any(getattr(correction, name) != getattr(app, name) for name in fixed_fields) or (
+                    {day.event_date: day.session for day in correction.event_days}
+                    != {day.event_date: day.session for day in app.event_days}
+                ):
+                    raise ApplicationError(422, "The event and schedule are fixed after evidence verification.")
+                app.description = correction.description
+            else:
+                _update_event(db, app, correction)
+            target = ApplicationStatus.UNDER_TUTOR_CORRECTION_REVIEW if is_hod_correction else ApplicationStatus.SUBMITTED
+            _transition(app, target, user, "Student resubmitted the application.")
             self._attach(app, files, user, keys)
             db.flush()
             return _detail(app)
@@ -218,7 +286,16 @@ class ODApplicationService:
             _check_revision(app, decision.expected_revision)
             if app.status not in _REVIEWABLE:
                 raise ApplicationError(409, "This application is not awaiting tutor review.")
-            _transition(app, _DECISIONS[decision.action], user, decision.remarks)
+            target = _DECISIONS[decision.action]
+            if app.status == ApplicationStatus.UNDER_TUTOR_CORRECTION_REVIEW:
+                if decision.action == "PREAPPROVE":
+                    from app.services.od_evidence import all_days_verified
+                    if not all_days_verified(app):
+                        raise ApplicationError(409, "Verify all required evidence before forwarding to the HOD.")
+                    target = ApplicationStatus.UNDER_HOD_REVIEW
+                elif decision.action == "REQUEST_CORRECTION":
+                    target = ApplicationStatus.HOD_CORRECTION_REQUESTED
+            _transition(app, target, user, decision.remarks)
             db.flush()
             return _detail(app)
 

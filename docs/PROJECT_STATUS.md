@@ -1,5 +1,7 @@
 # Campus OD – Project Status
 
+The Student, Tutor, HOD, and Admin features are implemented in the localhost demo. The phase notes below describe the earlier database foundation and its historical verification. See the current workflow, migration status, and deployment limits. [HOD approval guide](HOD_APPROVAL.md)
+
 **Sri Krishna Arts and Science College (SKASC)**  
 *Smart On-Duty Management System*
 

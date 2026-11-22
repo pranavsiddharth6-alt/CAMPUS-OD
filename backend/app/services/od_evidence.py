@@ -7,14 +7,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload, selectinload, sessionmaker
 
 from app.dependencies.auth import AuthenticatedUser
+from app.models.academic import HODAssignment
 from app.models.application import EventDay, ODApplication
+from app.models.user import User
 from app.models.enums import ApplicationStatus, EventDayStatus, EvidenceReviewStatus, UserRole
 from app.models.evidence import EvidenceReview, EvidenceSubmission, LocationCapture, StoredFile
+from app.schemas.application import ApplicationDetail, HODDecision
 from app.schemas.evidence import (
     ApplicationEvidenceView, DayEvidenceDecision, EventDayEvidenceView, EvidenceAttemptView, EvidenceFileView,
     EvidenceGPSView, EvidenceReviewView, EvidenceUploadRequest,
 )
-from app.services.od_applications import _scope, _transition
+from app.services.od_applications import (
+    _active_hod_assignment, _check_revision, _detail, _load as _load_application, _scope, _transition,
+)
 from app.services.private_uploads import ApplicationError, PrivateUpload, read_upload, store_upload, write_with_uploads
 from app.services.storage import LocalStorageService
 
@@ -22,6 +27,7 @@ _OPEN_STATUSES = {
     ApplicationStatus.PRE_APPROVED,
     ApplicationStatus.AWAITING_PARTICIPATION_PROOF,
     ApplicationStatus.UNDER_FINAL_VERIFICATION,
+    ApplicationStatus.UNDER_TUTOR_CORRECTION_REVIEW,
 }
 
 
@@ -58,10 +64,18 @@ def _day_state(day: EventDay):
     return "CORRECTION_REQUIRED"
 
 
+def all_days_verified(app: ODApplication) -> bool:
+    return len(app.event_days) == app.total_days > 0 and all(_day_state(day) == "VERIFIED" for day in app.event_days)
+
+
 def _app_state(app: ODApplication, user: AuthenticatedUser) -> None:
+    if app.status == ApplicationStatus.UNDER_TUTOR_CORRECTION_REVIEW:
+        return  # Corrected applications require an explicit tutor decision to return to the HOD.
     states = [_day_state(day) for day in app.event_days]
-    if states and all(state == "VERIFIED" for state in states):
-        target = ApplicationStatus.OD_FINALIZED
+    if all_days_verified(app):
+        _transition(app, ApplicationStatus.UNDER_HOD_REVIEW, user,
+                    "The tutor verified every event day and forwarded the application for HOD review.")
+        return
     elif states and all(state in {"VERIFIED", "REJECTED"} for state in states):
         target = ApplicationStatus.REJECTED
     elif "AWAITING_REVIEW" in states:
@@ -72,8 +86,13 @@ def _app_state(app: ODApplication, user: AuthenticatedUser) -> None:
         _transition(app, target, user)
 
 
-def _load(db: Session, application_id: UUID, user: AuthenticatedUser, *, lock: bool = False) -> ODApplication:
-    query = select(ODApplication).where(ODApplication.id == application_id, _scope(user)).options(
+def _load(
+    db: Session, application_id: UUID, user: AuthenticatedUser, *, lock: bool = False,
+) -> ODApplication:
+    # A decision must lock by department before checking the latest status and history.
+    query = select(ODApplication).where(
+        ODApplication.id == application_id, _scope(user, hod_review_only=not lock),
+    ).options(
         selectinload(ODApplication.status_history),
         selectinload(ODApplication.event_days).selectinload(EventDay.evidence_submissions).options(
             joinedload(EvidenceSubmission.venue_photo), joinedload(EvidenceSubmission.organizer_proof),
@@ -174,16 +193,26 @@ class ODEvidenceService:
         with self._sessions.begin() as db:
             app = _load(db, application_id, user, lock=True)
             day = _day(app, day_id)
+            reopening = (
+                app.status == ApplicationStatus.UNDER_TUTOR_CORRECTION_REVIEW
+                and decision.review_status == EvidenceReviewStatus.CORRECTION_REQUIRED
+                and _day_state(day) == "VERIFIED"
+            )
             attempts = _attempts(day)
             if not any(item.id == attempt_id for item in attempts):
                 raise ApplicationError(404, "Evidence submission not found.")
             current = attempts[-1]
-            if current.id != attempt_id or current.reviews:
+            if current.id != attempt_id or (current.reviews and not reopening):
                 raise ApplicationError(409, "This evidence has changed or already been reviewed.")
             if decision.review_status == EvidenceReviewStatus.APPROVED and not _complete(current):
                 raise ApplicationError(409, "Both files and a GPS capture are required before verification.")
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            reviews = _reviews(current)
+            if reviews:
+                now = max(now, reviews[-1].reviewed_at + timedelta(microseconds=1))
             current.reviews.append(EvidenceReview(
-                reviewed_by_tutor_id=app.assigned_tutor_id, review_status=decision.review_status, remarks=decision.remarks,
+                reviewed_by_tutor_id=app.assigned_tutor_id, review_status=decision.review_status,
+                remarks=decision.remarks, reviewed_at=now,
             ))
             day.day_status = {
                 EvidenceReviewStatus.APPROVED: EventDayStatus.VERIFIED,
@@ -195,6 +224,34 @@ class ODEvidenceService:
             _app_state(app, user)
             db.flush()
             return _view(app)
+
+    def decide_hod(
+        self, user: AuthenticatedUser, application_id: UUID, decision: HODDecision,
+    ) -> ApplicationDetail:
+        if user.role != UserRole.HOD:
+            raise ApplicationError(403, "Insufficient permissions.")
+        targets = {
+            "APPROVE": ApplicationStatus.OD_FINALIZED,
+            "REJECT": ApplicationStatus.REJECTED,
+            "REQUEST_CORRECTION": ApplicationStatus.HOD_CORRECTION_REQUESTED,
+        }
+        with self._sessions.begin() as db:
+            # Match the assignment administrator's lock order and recheck authorization in this transaction.
+            db.scalar(select(User.id).where(User.id == user.user_id).with_for_update(read=True))
+            app = _load(db, application_id, user, lock=True)
+            assignment_id = db.scalar(_active_hod_assignment(user).where(HODAssignment.department_id == app.department_id))
+            if assignment_id is None or (
+                app.status != ApplicationStatus.UNDER_HOD_REVIEW
+                and not any(entry.hod_assignment_id for entry in app.status_history)
+            ):
+                raise ApplicationError(404, "Application not found.")
+            _check_revision(app, decision.expected_revision)
+            if app.status != ApplicationStatus.UNDER_HOD_REVIEW or not all_days_verified(app):
+                raise ApplicationError(409, "This application requires completed tutor verification and pending HOD review.")
+            _transition(app, targets[decision.action], user, decision.remarks or None,
+                        hod_assignment_id=assignment_id)
+            db.flush()
+            return _detail(_load_application(db, application_id, user))
 
     def download(self, user: AuthenticatedUser, application_id: UUID, attempt_id: UUID, kind: str) -> PrivateUpload:
         with self._sessions() as db:

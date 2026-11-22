@@ -1,22 +1,24 @@
 """Read demo academic records and manage class-tutor mappings on localhost."""
 
 from datetime import datetime, timezone
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import joinedload, selectinload
 from starlette.concurrency import run_in_threadpool
 
 from app.api.v1.admin_provisioning import local_demo_directory
 from app.api.v1.auth import _COOKIE_AUTH_GUARDS, _NO_STORE, read_auth_json
 from app.database.session import get_session_factory
-from app.dependencies.auth import require_roles
-from app.models.academic import Class, ClassTutorAssignment, StudentClassEnrollment
+from app.dependencies.auth import AuthenticatedUser, require_roles
+from app.models.academic import Class, ClassTutorAssignment, Department, HODAssignment, StudentClassEnrollment
 from app.models.enums import AccountStatus, UserRole
-from app.models.user import TutorProfile, User
+from app.models.user import AuthSession, TutorProfile, User
+from app.services.auth_sessions import AuthSessionService
 
 router = APIRouter(
     prefix="/admin/academics", tags=["Local demo administration"],
@@ -79,7 +81,7 @@ def _set_mapping(class_id: UUID, payload: TutorMapping) -> None:
                 User.role == UserRole.TUTOR, User.account_status == AccountStatus.ACTIVE,
             ).with_for_update(read=True, of=(TutorProfile, User)))
             if tutor is None:
-                raise HTTPException(409, "Choose an active tutor in this class’s department.", headers=_NO_STORE)
+                raise HTTPException(409, "Choose an active tutor in this classâ€™s department.", headers=_NO_STORE)
             if existing is None:
                 db.add(ClassTutorAssignment(class_id=item.id, academic_year_id=item.academic_year_id,
                                             tutor_id=tutor, is_active=True))
@@ -97,4 +99,100 @@ async def set_mapping(class_id: UUID, request: Request) -> Response:
     if payload is None:
         raise HTTPException(422, "Choose a tutor or explicitly clear the mapping.", headers=_NO_STORE)
     await run_in_threadpool(_set_mapping, class_id, payload)
+    return Response(status_code=204, headers=_NO_STORE)
+
+
+Admin = Annotated[AuthenticatedUser, Depends(require_roles(UserRole.ADMIN))]
+
+
+class HODMapping(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: UUID | None
+    expected_assignment_id: UUID | None
+
+
+@router.get("/hod-assignments")
+def hod_assignments(response: Response):
+    response.headers.update(_NO_STORE)
+    try:
+        with get_session_factory()() as db:
+            departments = db.scalars(select(Department).order_by(Department.name)).all()
+            rows = db.execute(select(HODAssignment, User.email, User.role, User.account_status)
+                              .join(User, User.id == HODAssignment.user_id)
+                              .order_by(HODAssignment.assigned_at.desc(), HODAssignment.id)).all()
+            history = {department.id: [] for department in departments}
+            available = {}
+            assigned_users = set()
+            for mapping, email, role, status in rows:
+                history[mapping.department_id].append({
+                    "id": mapping.id, "user_id": mapping.user_id, "name": mapping.full_name,
+                    "email": email, "account_status": status, "assigned_at": mapping.assigned_at,
+                    "ended_at": mapping.ended_at,
+                })
+                if mapping.ended_at is None:
+                    assigned_users.add(mapping.user_id)
+                if role == UserRole.HOD and status == AccountStatus.ACTIVE:
+                    available.setdefault(mapping.user_id, {"id": mapping.user_id, "name": mapping.full_name})
+            return {
+                "departments": [{"id": item.id, "name": item.name, "history": history[item.id]}
+                                for item in departments],
+                "available_hods": [entry for user_id, entry in available.items() if user_id not in assigned_users],
+            }
+    except (SQLAlchemyError, OSError, RuntimeError, ValueError):
+        raise HTTPException(503, "HOD assignments are temporarily unavailable.", headers=_NO_STORE) from None
+
+
+def _set_hod_mapping(department_id: UUID, payload: HODMapping, actor_id: UUID) -> None:
+    try:
+        with get_session_factory().begin() as db:
+            department = db.scalar(select(Department.id).where(Department.id == department_id).with_for_update())
+            if department is None:
+                raise HTTPException(404, "Department not found.", headers=_NO_STORE)
+            current = db.scalar(select(HODAssignment).where(
+                HODAssignment.department_id == department_id, HODAssignment.ended_at.is_(None),
+            ))
+            if payload.expected_assignment_id != (current.id if current else None):
+                raise HTTPException(409, "The assignment changed. Refresh and try again.", headers=_NO_STORE)
+            if payload.user_id == (current.user_id if current else None):
+                return
+            affected = {user_id for user_id in (payload.user_id, current.user_id if current else None) if user_id}
+            users = {user.id: user for user in db.scalars(
+                select(User).where(User.id.in_(affected)).order_by(User.id).with_for_update()
+            )}
+            name = None
+            if payload.user_id:
+                incoming = users.get(payload.user_id)
+                previous = db.scalars(select(HODAssignment).where(HODAssignment.user_id == payload.user_id)
+                                      .order_by(HODAssignment.assigned_at.desc(), HODAssignment.id).limit(1)).first()
+                if (incoming is None or incoming.role != UserRole.HOD or incoming.account_status != AccountStatus.ACTIVE
+                        or previous is None or previous.ended_at is None):
+                    raise HTTPException(409, "Choose an active HOD account without an assignment.", headers=_NO_STORE)
+                name = previous.full_name
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            if current:
+                current.ended_at, current.ended_by_user_id = max(now, current.assigned_at), actor_id
+                db.flush()
+            if payload.user_id:
+                db.add(HODAssignment(department_id=department_id, user_id=payload.user_id, full_name=name,
+                                     assigned_by_user_id=actor_id, assigned_at=now))
+            for user in users.values():
+                if user.account_status == AccountStatus.ACTIVE:
+                    user.auth_version += 1
+            for session in db.scalars(select(AuthSession).where(
+                AuthSession.user_id.in_(affected), AuthSession.revoked_at.is_(None),
+            ).with_for_update()):
+                AuthSessionService._revoke_locked_session(db, session, now)
+    except IntegrityError:
+        raise HTTPException(409, "The HOD already has an active assignment.", headers=_NO_STORE) from None
+    except (SQLAlchemyError, OSError, RuntimeError, ValueError):
+        raise HTTPException(503, "The HOD assignment could not be saved.", headers=_NO_STORE) from None
+
+
+@router.put("/departments/{department_id}/hod", status_code=204, dependencies=_COOKIE_AUTH_GUARDS)
+async def set_hod_mapping(department_id: UUID, request: Request, admin: Admin) -> Response:
+    payload = await read_auth_json(request, HODMapping)
+    if payload is None:
+        raise HTTPException(422, "Choose an HOD or explicitly end the current assignment.", headers=_NO_STORE)
+    await run_in_threadpool(_set_hod_mapping, department_id, payload, admin.user_id)
     return Response(status_code=204, headers=_NO_STORE)

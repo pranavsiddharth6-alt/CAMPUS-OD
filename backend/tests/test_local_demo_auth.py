@@ -112,6 +112,54 @@ class LocalDemoAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.post("/api/v1/auth/logout", headers=self.headers)).status_code, 204)
         self.assertEqual((await self.client.get("/api/v1/auth/me", headers=refreshed_headers)).status_code, 401)
 
+    async def test_hod_activation_mapping_history_and_session_revocation(self):
+        hod, account, invitation = await self.issue("hods")
+        self.assertEqual((await self.login(hod["email"])).status_code, 401)
+        self.assertEqual((await self.activate(invitation)).status_code, 204)
+        admin = self.bearer(await self.login(DEMO_ADMIN_EMAIL))
+        hod_headers = self.bearer(await self.login(hod["email"]))
+        me = await self.client.get("/api/v1/auth/me", headers=hod_headers)
+        self.assertEqual(me.json(), {"id": account["user_id"], "role": "HOD", "email": hod["email"]})
+
+        from app.schemas.provisioning import ApprovedHODRecord, HODProvisioningRequest
+        from app.services.account_provisioning import AccountProvisioningService, ProvisioningConflictError
+        alternate = HODProvisioningRequest(**(hod | {"email": "alternate.hod@example.com"}))
+        service = AccountProvisioningService(session_factory=self.factory, deliver_invitation=lambda _: True)
+        admin_id = UUID((await self.client.get("/api/v1/auth/me", headers=admin)).json()["id"])
+        with self.assertRaises(ProvisioningConflictError):
+            service.provision_hod(alternate, approved=ApprovedHODRecord(**alternate.model_dump()),
+                                  administrator_id=admin_id)
+        with self.factory() as db:
+            self.assertIsNone(db.scalar(sa.select(User.id).where(User.email == alternate.email)))
+
+        base = "/api/v1/admin/academics"
+        history = (await self.client.get(base + "/hod-assignments", headers=admin)).json()
+        current, = history["departments"][0]["history"]
+        self.assertEqual(current["id"], account["profile_id"])
+        endpoint = f"{base}/departments/{hod['department_id']}/hod"
+        payload = {"user_id": None, "expected_assignment_id": current["id"]}
+        self.assertEqual((await self.client.put(endpoint, headers=hod_headers, json=payload)).status_code, 403)
+        self.assertEqual((await self.client.put(endpoint, headers=admin, json=payload)).status_code, 204)
+        self.assertEqual((await self.client.get("/api/v1/auth/me", headers=hod_headers)).status_code, 401)
+        self.assertEqual((await self.client.post("/api/v1/auth/refresh", headers=self.headers)).status_code, 401)
+        self.assertEqual((await self.client.put(endpoint, headers=admin, json=payload)).status_code, 409)
+        payload = {"user_id": account["user_id"], "expected_assignment_id": None}
+        self.assertEqual((await self.client.put(endpoint, headers=admin, json=payload)).status_code, 204)
+        history = (await self.client.get(base + "/hod-assignments", headers=admin)).json()
+        active, ended = history["departments"][0]["history"]
+        self.assertIsNone(active["ended_at"])
+        self.assertIsNotNone(ended["ended_at"])
+        self.assertNotEqual(active["id"], ended["id"])
+
+        for change, restore in (({"account_status": AccountStatus.DISABLED}, {"account_status": AccountStatus.ACTIVE}),
+                                ({"role": "TUTOR"}, {"role": "HOD"})):
+            hod_headers = self.bearer(await self.login(hod["email"]))
+            for values in (change, restore):
+                with self.factory.begin() as db:
+                    db.execute(sa.update(User).where(User.id == UUID(account["user_id"])).values(**values))
+            self.assertEqual((await self.client.get("/api/v1/auth/me", headers=hod_headers)).status_code, 401)
+            self.assertEqual((await self.client.post("/api/v1/auth/refresh", headers=self.headers)).status_code, 401)
+
     async def test_tutor_invitation_can_be_consumed_only_once_concurrently(self):
         tutor, account, invitation = await self.issue("tutors")
         responses = await asyncio.gather(self.activate(invitation), self.activate(invitation))

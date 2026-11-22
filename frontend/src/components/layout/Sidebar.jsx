@@ -41,6 +41,11 @@ export function Sidebar({ role = 'student', isOpen, onClose }) {
         icon: CheckSquare,
       },
     ],
+    hod: [
+      { name: 'HOD Dashboard', to: '/hod/dashboard', icon: LayoutDashboard },
+      { name: 'Pending Requests', to: '/hod/applications', icon: CheckSquare },
+      { name: 'Decision History', to: '/hod/history', icon: FileText },
+    ],
     admin: [
       {
         name: 'Admin Overview',
@@ -65,6 +70,7 @@ export function Sidebar({ role = 'student', isOpen, onClose }) {
   const roleLabels = {
     student: 'Student Workspace',
     tutor: 'Class Tutor Workspace',
+    hod: 'Head of Department Workspace',
     admin: 'Institutional Administration',
   };
 

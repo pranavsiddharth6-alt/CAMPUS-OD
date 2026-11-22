@@ -10,7 +10,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.models.academic import AcademicYear, Class, Department
-from app.schemas.provisioning import ApprovedStudentRecord, ApprovedTutorRecord
+from app.schemas.provisioning import ApprovedHODRecord, ApprovedStudentRecord, ApprovedTutorRecord
 from app.services.account_provisioning import ActivationInvitation
 
 DEMO_ORIGIN = "http://localhost:5173"
@@ -27,6 +27,10 @@ DEMO_TUTOR = ApprovedTutorRecord(
     email="demo.tutor@example.com", full_name="Demo Tutor", staff_id="DEMO-T001",
     designation="Demo Lecturer", department_id=_DEPARTMENT,
 )
+
+
+DEMO_HOD = ApprovedHODRecord(email="demo.hod@example.com", full_name="Demo Head of Department",
+                             department_id=_DEPARTMENT)
 
 
 def seed_demo_academics(db: Session) -> None:

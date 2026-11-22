@@ -17,6 +17,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     UniqueConstraint,
     Index,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -36,6 +37,31 @@ class Department(Base):
     classes = relationship("Class", back_populates="department")
     students = relationship("StudentProfile", back_populates="department")
     tutors = relationship("TutorProfile", back_populates="department")
+
+
+class HODAssignment(Base):
+    __tablename__ = "hod_assignments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    department_id = Column(UUID(as_uuid=True), ForeignKey("departments.id", ondelete="RESTRICT"), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True)
+    full_name = Column(String(150), nullable=False)
+    assigned_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    assigned_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    ended_at = Column(DateTime)
+    ended_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"))
+
+    __table_args__ = (
+        CheckConstraint(
+            "(ended_at IS NULL AND ended_by_user_id IS NULL) OR "
+            "(ended_at >= assigned_at AND ended_at IS NOT NULL AND ended_by_user_id IS NOT NULL)",
+            name="ck_hod_assignment_end",
+        ),
+        Index("uq_hod_active_department", "department_id", unique=True,
+              postgresql_where=text("ended_at IS NULL"), sqlite_where=text("ended_at IS NULL")),
+        Index("uq_hod_active_user", "user_id", unique=True,
+              postgresql_where=text("ended_at IS NULL"), sqlite_where=text("ended_at IS NULL")),
+    )
 
 
 class AcademicYear(Base):

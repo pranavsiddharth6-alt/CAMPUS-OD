@@ -2,7 +2,7 @@
 
 **Sri Krishna Arts and Science College (SKASC)**
 
-A dedicated institutional platform for managing and verifying student On-Duty (OD) applications, workflows, and approvals across students, tutors, and administrators.
+A dedicated institutional platform for managing and verifying student On-Duty (OD) applications, workflows, and approvals across students, class tutors, Heads of Department (HODs), and administrators.
 
 ---
 
@@ -59,7 +59,7 @@ CAMPUS OD/
 
 ## Getting Started
 
-For the isolated authentication demo, see the [local demo guide](docs/LOCAL_DEMO.md). It covers reference data, explicit administrator bootstrap, invitation handoff, and the browser flow.
+For the isolated SQLite demo, see the setup and browser walkthrough. For role permissions, the approval workflow, API routes and migration details, see the HOD implementation guide. [Local demo](docs/LOCAL_DEMO.md) · [HOD approval](docs/HOD_APPROVAL.md)
 
 ### Prerequisites
 - Node.js (v18+) and npm
@@ -104,10 +104,6 @@ The backend API documentation will be available at:
 
 ---
 
-## Current Status (Phase 1)
-- [x] Monorepo workspace structure initialized
-- [x] Git repository initialized with strict exclusion rules
-- [x] React + Vite + Tailwind CSS foundation established with SKASC Navy theme
-- [x] FastAPI backend foundation with root health check (`GET /`) and CORS
-- [x] Modular architecture separating config, database layer, routes, and storage
-- [ ] Phase 2: PostgreSQL schema design and SQLAlchemy 2.0 models (Upcoming)
+## Current status
+
+The localhost SQLite demo supports all four roles. Tutors verify each event day's evidence before the application goes to the department HOD. HOD approval finalizes the OD. Revision `0004_hod_approval` is prepared for PostgreSQL and awaits approval for live Supabase deployment. [Workflow and migration details](docs/HOD_APPROVAL.md)

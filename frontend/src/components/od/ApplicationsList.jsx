@@ -8,7 +8,7 @@ import { Input } from '../ui/Input';
 import { Select } from '../ui/Select';
 import { Table, TableCell, TableRow } from '../ui/Table';
 import { API_ENDPOINTS } from '../../services/api';
-import { dateRange, reviewable, statusLabel, statusVariant, useODResource } from '../../services/od';
+import { correctionRequested, dateRange, reviewable, statusLabel, statusVariant, useODResource } from '../../services/od';
 
 export function ApplicationsList({ tutor = false, dashboard = false }) {
   const portal = tutor ? 'tutor' : 'student';
@@ -45,8 +45,9 @@ export function ApplicationsList({ tutor = false, dashboard = false }) {
           {[
             ['Applications', records.length],
             ['Awaiting review', records.filter((app) => reviewable.has(app.status)).length],
-            ['Corrections requested', records.filter((app) => app.status === 'CORRECTION_REQUESTED').length],
+            ['Corrections requested', records.filter((app) => correctionRequested.has(app.status)).length],
             ['Preapproved', records.filter((app) => app.status === 'PRE_APPROVED').length],
+            ['Awaiting HOD review', records.filter((app) => app.status === 'UNDER_HOD_REVIEW').length],
           ].map(([label, count]) => (
             <Card key={label}>
               <p className="text-xs text-brand-muted">{label}</p><p className="text-xl font-semibold">{count}</p>

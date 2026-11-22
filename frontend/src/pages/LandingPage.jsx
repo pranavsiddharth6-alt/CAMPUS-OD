@@ -1,15 +1,12 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import { Card } from '../components/ui/Card';
-import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import {
   GraduationCap,
   UserCheck,
   ShieldCheck,
   FileCheck2,
-  MapPin,
-  Clock,
   ArrowRight,
   Building2,
 } from 'lucide-react';
@@ -31,7 +28,7 @@ export function LandingPage() {
         </p>
         <p className="text-xs sm:text-sm text-brand-muted max-w-2xl mx-auto mt-3 leading-relaxed">
           The centralized institutional portal for submitting, verifying, and tracking official
-          college on-duty permissions with tutor endorsements and event evidence.
+          college on-duty permissions with tutor verification and department approval.
         </p>
 
         <div className="flex flex-wrap items-center justify-center gap-3 mt-6">
@@ -49,7 +46,7 @@ export function LandingPage() {
       </div>
 
       {/* Role Gateways */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Student Gateway */}
         <Card
           title="Student Portal"
@@ -105,9 +102,25 @@ export function LandingPage() {
             </li>
             <li className="flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-brand-secondary" />
-              Final proof audit &amp; approval
+              Verify evidence for each event day
             </li>
           </ul>
+        </Card>
+
+        <Card
+          title="HOD Portal"
+          subtitle="Department OD approval"
+          icon={FileCheck2}
+          footer={
+            <Link to="/hod/dashboard">
+              <Button variant="outline" size="sm" className="w-full justify-between">
+                <span>Enter HOD Portal</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </Button>
+            </Link>
+          }
+        >
+          <p className="text-xs text-slate-600">Review tutor-verified applications and record the final OD decision.</p>
         </Card>
 
         {/* Admin Gateway */}
@@ -131,7 +144,7 @@ export function LandingPage() {
             </li>
             <li className="flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-brand-secondary" />
-              Department &amp; class tutor mapping
+              Department HOD and class tutor assignments
             </li>
             <li className="flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-brand-secondary" />
@@ -146,7 +159,7 @@ export function LandingPage() {
         <h3 className="text-sm font-bold text-brand-primary uppercase tracking-wider mb-4">
           Institutional OD Workflow Protocol
         </h3>
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 text-xs text-slate-600">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 text-xs text-slate-600">
           <div className="p-3 bg-slate-50 border border-slate-200 rounded-md">
             <div className="font-semibold text-brand-dark mb-1">1. Student Application</div>
             Student submits request with event details and uploads original college form.
@@ -157,11 +170,15 @@ export function LandingPage() {
           </div>
           <div className="p-3 bg-slate-50 border border-slate-200 rounded-md">
             <div className="font-semibold text-brand-dark mb-1">3. Event Proof Submission</div>
-            Student submits GPS map camera photo and organizer attendance proof.
+            Student captures browser GPS and uploads a venue photo and organizer proof for each day.
           </div>
           <div className="p-3 bg-slate-50 border border-slate-200 rounded-md">
-            <div className="font-semibold text-brand-dark mb-1">4. Final Verification</div>
-            Tutor validates submitted proof for final institutional attendance credit.
+            <div className="font-semibold text-brand-dark mb-1">4. Tutor Evidence Verification</div>
+            Tutor verifies each day before forwarding the application.
+          </div>
+          <div className="p-3 bg-slate-50 border border-slate-200 rounded-md">
+            <div className="font-semibold text-brand-dark mb-1">5. HOD Decision</div>
+            The department HOD approves, rejects, or requests a correction. Approval finalizes the OD.
           </div>
         </div>
       </div>

@@ -4,6 +4,7 @@ Sri Krishna Arts and Science College (SKASC) - Campus OD
 Uses pg8000 (pure-Python) driver for Windows Application Control compatibility.
 """
 import ssl
+from threading import Lock
 import time
 from pathlib import Path
 from typing import Generator
@@ -17,6 +18,7 @@ Base = declarative_base()
 # SQLAlchemy 2.0 Engine for PostgreSQL
 _engine = None
 _SessionLocal = None
+_demo_engine_lock = Lock()
 
 
 def create_db_ssl_context() -> ssl.SSLContext:
@@ -35,13 +37,21 @@ def get_engine():
     global _engine, _SessionLocal
     if _engine is None:
         if settings.ENVIRONMENT == "local-demo":
-            from app.database.demo import DemoSession, create_demo_engine
+            from app.database.demo import DemoSession, create_demo_engine, upgrade_demo_hod
 
             directory = settings.LOCAL_DEMO_DIR
             if directory is None or not (directory / "campus_od.sqlite3").is_file():
                 raise ValueError("Initialize the local demo database before starting the demo.")
-            _engine = create_demo_engine(directory)
-            _SessionLocal = sessionmaker(bind=_engine, class_=DemoSession, autoflush=False, expire_on_commit=False)
+            with _demo_engine_lock:
+                if _engine is None:
+                    engine = create_demo_engine(directory)
+                    try:
+                        upgrade_demo_hod(engine)
+                    except Exception:
+                        engine.dispose()
+                        raise
+                    _SessionLocal = sessionmaker(bind=engine, class_=DemoSession, autoflush=False, expire_on_commit=False)
+                    _engine = engine
             return _engine
 
         if not settings.DATABASE_URL:

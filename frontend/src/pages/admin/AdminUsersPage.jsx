@@ -3,6 +3,7 @@ import { UserPlus } from 'lucide-react';
 import { Button } from '../../components/ui/Button';
 import { Card } from '../../components/ui/Card';
 import { API_ENDPOINTS, apiClient } from '../../services/api';
+import { odError } from '../../services/od';
 
 export function AdminUsersPage() {
   const [roster, setRoster] = useState(null);
@@ -25,7 +26,7 @@ export function AdminUsersPage() {
       const result = await apiClient(endpoint, { method: 'POST', body: JSON.stringify(record) });
       setCreated((previous) => ({ ...previous, [record.email]: result }));
     } catch (failure) {
-      setError(failure.status === 409 ? 'This demo account already exists.' : 'The demo account could not be created.');
+      setError(odError(failure, 'The demo account could not be created.'));
     } finally {
       setBusy('');
     }
@@ -34,6 +35,7 @@ export function AdminUsersPage() {
   const groups = roster ? [
     { title: 'Students', records: roster.students, endpoint: API_ENDPOINTS.ADMIN.STUDENTS },
     { title: 'Tutors', records: roster.tutors, endpoint: API_ENDPOINTS.ADMIN.TUTORS },
+    { title: 'Heads of Department', records: roster.hods, endpoint: API_ENDPOINTS.ADMIN.HODS },
   ] : [];
 
   return (
@@ -54,6 +56,9 @@ export function AdminUsersPage() {
                   <div>
                     <p className="text-sm font-semibold text-brand-dark">{record.full_name}</p>
                     <p className="text-xs text-brand-muted">{record.email}</p>
+                    {endpoint === API_ENDPOINTS.ADMIN.HODS && (
+                      <p className="text-xs text-brand-muted">Initial assignment · Demo Department</p>
+                    )}
                   </div>
                   <Button icon={UserPlus} disabled={Boolean(busy || result)} onClick={() => provision(endpoint, record)}>
                     {busy === record.email ? 'Creating…' : 'Create account'}

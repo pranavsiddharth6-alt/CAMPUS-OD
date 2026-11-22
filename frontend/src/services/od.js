@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { apiClient } from './api';
 
-export const reviewable = new Set(['SUBMITTED', 'UNDER_TUTOR_REVIEW']);
-export const evidenceOpen = new Set(['PRE_APPROVED', 'AWAITING_PARTICIPATION_PROOF', 'UNDER_FINAL_VERIFICATION']);
+export const reviewable = new Set(['SUBMITTED', 'UNDER_TUTOR_REVIEW', 'UNDER_TUTOR_CORRECTION_REVIEW']);
+export const evidenceOpen = new Set(['PRE_APPROVED', 'AWAITING_PARTICIPATION_PROOF', 'UNDER_FINAL_VERIFICATION', 'UNDER_TUTOR_CORRECTION_REVIEW']);
+
+export const correctionRequested = new Set(['CORRECTION_REQUESTED', 'HOD_CORRECTION_REQUESTED']);
 
 const statuses = {
   SUBMITTED: ['Submitted', 'primary'],
@@ -10,7 +12,10 @@ const statuses = {
   CORRECTION_REQUESTED: ['Correction requested', 'warning'],
   PRE_APPROVED: ['Preapproved', 'success'],
   AWAITING_PARTICIPATION_PROOF: ['Awaiting participation evidence', 'warning'],
-  UNDER_FINAL_VERIFICATION: ['Under final verification', 'primary'],
+  UNDER_FINAL_VERIFICATION: ['Tutor evidence verification', 'primary'],
+  UNDER_HOD_REVIEW: ['Awaiting HOD review', 'primary'],
+  HOD_CORRECTION_REQUESTED: ['Correction after HOD review', 'warning'],
+  UNDER_TUTOR_CORRECTION_REVIEW: ['Tutor reviewing corrections', 'warning'],
   OD_FINALIZED: ['OD finalized', 'success'],
   REJECTED: ['Rejected', 'danger'],
 };
@@ -33,6 +38,22 @@ export async function downloadODFile(endpoint, filename) {
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export async function viewODFile(endpoint) {
+  const tab = window.open('about:blank', '_blank');
+  if (!tab) throw new Error('The preview window was blocked.');
+  tab.opener = null;
+  try {
+    const blob = await apiClient(endpoint, { responseType: 'blob' });
+    if (tab.closed) return;
+    const url = URL.createObjectURL(blob);
+    tab.location.replace(url);
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  } catch (error) {
+    tab.close();
+    throw error;
+  }
 }
 
 export function useODResource(endpoint) {

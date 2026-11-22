@@ -21,7 +21,7 @@ from app.core.config import settings
 from app.database.session import get_session_factory
 from app.dependencies.auth import AuthenticatedUser, require_roles
 from app.models.enums import DocumentType, UserRole
-from app.schemas.application import ApplicationCorrection, ApplicationDetail, ApplicationSubmission, ApplicationSummary, TutorDecision
+from app.schemas.application import ApplicationCorrection, ApplicationDetail, ApplicationSubmission, ApplicationSummary, HODDecision, TutorDecision
 from app.schemas.evidence import ApplicationEvidenceView, DayEvidenceDecision, EvidenceUploadRequest
 from app.services.od_applications import ODApplicationService, ODFile
 from app.services.od_evidence import ODEvidenceService
@@ -31,7 +31,8 @@ from app.services.storage import storage_service
 od_router = APIRouter(tags=["On-Duty applications"])
 Student = Annotated[AuthenticatedUser, Depends(require_roles(UserRole.STUDENT))]
 Tutor = Annotated[AuthenticatedUser, Depends(require_roles(UserRole.TUTOR))]
-Participant = Annotated[AuthenticatedUser, Depends(require_roles(UserRole.STUDENT, UserRole.TUTOR))]
+HOD = Annotated[AuthenticatedUser, Depends(require_roles(UserRole.HOD))]
+Participant = Annotated[AuthenticatedUser, Depends(require_roles(UserRole.STUDENT, UserRole.TUTOR, UserRole.HOD))]
 _Result = TypeVar("_Result")
 _Service = TypeVar("_Service", ODApplicationService, ODEvidenceService)
 _NO_STORE = {"Cache-Control": "no-store"}
@@ -159,6 +160,31 @@ def student_applications(response: Response, user: Student) -> list[ApplicationS
 def tutor_applications(response: Response, user: Tutor) -> list[ApplicationSummary]:
     response.headers.update(_NO_STORE)
     return _perform(lambda service: service.list_applications(user))
+
+
+@od_router.get("/hod/applications")
+def hod_applications(
+    response: Response, user: HOD, view: Literal["pending", "history"] | None = None,
+) -> list[ApplicationSummary]:
+    response.headers.update(_NO_STORE)
+    return _perform(lambda service: service.list_applications(user, view=view))
+
+
+@od_router.get("/hod/dashboard")
+def hod_dashboard(response: Response, user: HOD) -> dict[str, int]:
+    response.headers.update(_NO_STORE)
+    return _perform(lambda service: service.hod_counts(user))
+
+
+@od_router.post("/hod/applications/{application_id}/decision")
+async def decide_hod(application_id: UUID, request: Request, response: Response, user: HOD) -> ApplicationDetail:
+    decision = await read_auth_json(request, HODDecision)
+    if decision is None:
+        raise _error(422, "Select a decision and provide remarks for rejection or correction.")
+    response.headers.update(_NO_STORE)
+    return await run_in_threadpool(
+        _perform, lambda service: service.decide_hod(user, application_id, decision), ODEvidenceService,
+    )
 
 
 @od_router.get("/applications/{application_id}")

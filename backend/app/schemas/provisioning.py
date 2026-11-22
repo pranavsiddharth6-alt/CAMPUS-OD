@@ -30,6 +30,14 @@ class TutorProvisioningRequest(_ProvisioningIdentity):
     designation: _Designation
 
 
+class HODProvisioningRequest(_ProvisioningIdentity):
+    pass
+
+
+class ApprovedHODRecord(HODProvisioningRequest):
+    """A backend-supplied record from the approved staff roster."""
+
+
 class ApprovedStudentRecord(StudentProvisioningRequest):
     """A backend-supplied roster record with its approved academic year."""
 
@@ -43,6 +51,7 @@ class ApprovedTutorRecord(TutorProvisioningRequest):
 class DemoRosterResponse(BaseModel):
     students: list[StudentProvisioningRequest]
     tutors: list[TutorProvisioningRequest]
+    hods: list[HODProvisioningRequest]
 
 
 class ProvisioningResponse(BaseModel):

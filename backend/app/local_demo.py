@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
 from app.core.passwords import hash_new_password
-from app.database.demo import create_demo_engine
+from app.database.demo import create_demo_engine, upgrade_demo_hod
 from app.database.session import Base
 from app.models import (
     AcademicYear, AccountActionToken, AdminProfile, AuthSession, Class, Department, RefreshToken,
@@ -23,13 +23,14 @@ from app.models import (
     ApplicationDocument, ApplicationStatusHistory, ClassTutorAssignment, EventDay, ODApplication, StoredFile,
     EvidenceReview, EvidenceSubmission, LocationCapture,
 )
+from app.models.academic import HODAssignment
 from app.models.enums import AccountStatus
 from app.services.demo_accounts import (
     DEMO_ADMIN_EMAIL, DEMO_ORIGIN, DEMO_STUDENT, DEMO_TUTOR, DemoInvitationOutbox, seed_demo_academics,
 )
 
 _OD_MODELS = (
-    ClassTutorAssignment, ODApplication, EventDay, StoredFile, ApplicationDocument, ApplicationStatusHistory,
+    ClassTutorAssignment, HODAssignment, ODApplication, EventDay, StoredFile, ApplicationDocument, ApplicationStatusHistory,
     EvidenceSubmission, LocationCapture, EvidenceReview,
 )
 
@@ -54,6 +55,7 @@ def initialize_demo(directory: Path) -> None:
                 User, AdminProfile, StudentProfile, TutorProfile, Department, AcademicYear, Class,
                 StudentClassEnrollment, AuthSession, RefreshToken, AccountActionToken, *_OD_MODELS,
             )])
+        upgrade_demo_hod(engine)
         with sessionmaker(engine).begin() as db:
             seed_demo_academics(db)
     finally:
@@ -90,6 +92,7 @@ def prepare_demo_od(directory: Path) -> None:
     try:
         with engine.begin() as connection:
             Base.metadata.create_all(connection, tables=[model.__table__ for model in _OD_MODELS])
+        upgrade_demo_hod(engine)
         with sessionmaker(engine).begin() as db:
             tutor_id = db.scalar(select(TutorProfile.id).join(TutorProfile.user).where(
                 User.email == DEMO_TUTOR.email, User.role == UserRole.TUTOR, User.account_status == AccountStatus.ACTIVE,

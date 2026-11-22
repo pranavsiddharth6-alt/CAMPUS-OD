@@ -43,6 +43,9 @@ class ODApplication(Base):
     # Student who submitted
     student_id = Column(UUID(as_uuid=True), ForeignKey("student_profiles.id", ondelete="RESTRICT"), nullable=False, index=True)
     
+    # Department ownership follows the application, even if the student later transfers.
+    department_id = Column(UUID(as_uuid=True), ForeignKey("departments.id", ondelete="RESTRICT"), index=True)
+
     # Snapshot of assigned class tutor at time of submission
     assigned_tutor_id = Column(UUID(as_uuid=True), ForeignKey("tutor_profiles.id", ondelete="RESTRICT"), nullable=False, index=True)
 
@@ -116,8 +119,14 @@ class ApplicationStatusHistory(Base):
     from_status = Column(application_status_type, nullable=True)
     to_status = Column(application_status_type, nullable=False)
     changed_by_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    hod_assignment_id = Column(UUID(as_uuid=True), ForeignKey("hod_assignments.id", ondelete="RESTRICT"))
     remarks = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
     application = relationship("ODApplication", back_populates="status_history")
     changed_by = relationship("User")
+    hod_assignment = relationship("HODAssignment")
+
+    @property
+    def hod_name(self):
+        return self.hod_assignment.full_name if self.hod_assignment else None

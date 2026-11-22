@@ -32,11 +32,19 @@ export const API_ENDPOINTS = {
     DECISION: (id) => `${API_BASE_URL}/tutor/applications/${id}/decision`,
     REVIEW_EVIDENCE: (id, day, submission) => `${API_BASE_URL}/tutor/applications/${id}/days/${day}/evidence/${submission}/review`,
   },
+  HOD: {
+    DASHBOARD: `${API_BASE_URL}/hod/dashboard`,
+    APPLICATIONS: `${API_BASE_URL}/hod/applications`,
+    DECISION: (id) => `${API_BASE_URL}/hod/applications/${id}/decision`,
+  },
   ADMIN: {
     USERS: `${API_BASE_URL}/admin/users`,
     METRICS: `${API_BASE_URL}/admin/metrics`,
     DEMO_ROSTER: `${API_BASE_URL}/admin/demo-roster`,
     STUDENTS: `${API_BASE_URL}/admin/students`,
+    HODS: `${API_BASE_URL}/admin/hods`,
+    HOD_ASSIGNMENTS: `${API_BASE_URL}/admin/academics/hod-assignments`,
+    ASSIGN_HOD: (id) => `${API_BASE_URL}/admin/academics/departments/${id}/hod`,
     TUTORS: `${API_BASE_URL}/admin/tutors`,
     ACADEMICS: `${API_BASE_URL}/admin/academics`,
     ASSIGN_TUTOR: (id) => `${API_BASE_URL}/admin/academics/classes/${id}/tutor`,
@@ -56,6 +64,7 @@ export const portalPaths = {
   STUDENT: '/student/dashboard',
   TUTOR: '/tutor/dashboard',
   ADMIN: '/admin/dashboard',
+  HOD: '/hod/dashboard',
 };
 
 export const getSession = () => snapshot;
