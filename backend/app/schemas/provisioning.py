@@ -1,6 +1,6 @@
 """Inputs for college-managed student and tutor provisioning."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, StringConstraints
@@ -23,6 +23,8 @@ class StudentProvisioningRequest(_ProvisioningIdentity):
     roll_number: _Identifier
     register_number: _Identifier
     class_id: UUID
+    gender: Literal["MALE", "FEMALE"] | None = None
+    accommodation: Literal["COLLEGE_HOSTEL", "OUTSIDE_STAYING", "GUARDIAN", "OTHER"] | None = None
 
 
 class TutorProvisioningRequest(_ProvisioningIdentity):

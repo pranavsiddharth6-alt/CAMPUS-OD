@@ -21,8 +21,13 @@ from app.core.config import settings
 from app.database.session import get_session_factory
 from app.dependencies.auth import AuthenticatedUser, require_roles
 from app.models.enums import DocumentType, UserRole
-from app.schemas.application import ApplicationCorrection, ApplicationDetail, ApplicationSubmission, ApplicationSummary, HODDecision, TutorDecision
+from app.schemas.application import (
+    ApplicationCorrection, ApplicationDetail, ApplicationOverview, ApplicationSubmission, ApplicationSummary,
+    HODDecision, PriorODSubmission, TutorDecision,
+)
 from app.schemas.evidence import ApplicationEvidenceView, DayEvidenceDecision, EvidenceUploadRequest
+from app.schemas.map_od import CaptureRequest, MapODView
+from app.services.map_od import MapODService, utc_now
 from app.services.od_applications import ODApplicationService, ODFile
 from app.services.od_evidence import ODEvidenceService
 from app.services.private_uploads import ApplicationError, PrivateUpload
@@ -34,7 +39,7 @@ Tutor = Annotated[AuthenticatedUser, Depends(require_roles(UserRole.TUTOR))]
 HOD = Annotated[AuthenticatedUser, Depends(require_roles(UserRole.HOD))]
 Participant = Annotated[AuthenticatedUser, Depends(require_roles(UserRole.STUDENT, UserRole.TUTOR, UserRole.HOD))]
 _Result = TypeVar("_Result")
-_Service = TypeVar("_Service", ODApplicationService, ODEvidenceService)
+_Service = TypeVar("_Service", ODApplicationService, ODEvidenceService, MapODService)
 _NO_STORE = {"Cache-Control": "no-store"}
 _FIELDS = {
     "original_form": DocumentType.ORIGINAL_SIGNED_OD_FORM,
@@ -117,16 +122,16 @@ async def _upload_form(request: Request, file_count: int):
 
 
 async def _read_submission(
-    request: Request, schema: type[_Submission], *, require_original: bool,
+    request: Request, schema: type[_Submission], *, allow_original: bool,
 ) -> tuple[_Submission, list[ODFile]]:
-    async with _upload_form(request, 3 if require_original else 2) as form:
+    async with _upload_form(request, 3 if allow_original else 2) as form:
         details = form.get("details")
         if not isinstance(details, str):
             raise _error(422, "Application details are required.")
         try:
             submission = schema.model_validate_json(details)
         except ValidationError:
-            raise _error(422, "Check the event information and provide distinct event dates.") from None
+            raise _error(422, "Check the event information, venue pin and distinct event dates.") from None
         files = []
         seen = {"details"}
         for name, value in form.multi_items():
@@ -134,18 +139,16 @@ async def _read_submission(
                 continue
             if name in seen or name not in _FIELDS or not isinstance(value, UploadFile):
                 raise _error(422, "Unexpected document field.")
-            if name == "original_form" and not require_original:
+            if name == "original_form" and not allow_original:
                 raise _error(422, "The original signed OD form cannot be replaced.")
             seen.add(name)
             files.append(ODFile(_FIELDS[name], await _read_file(value)))
-        if require_original and "original_form" not in seen:
-            raise _error(422, "The original signed OD form is required.")
         return submission, files
 
 
 @od_router.post("/applications", status_code=201)
 async def submit(request: Request, response: Response, user: Student) -> ApplicationDetail:
-    submission, files = await _read_submission(request, ApplicationSubmission, require_original=True)
+    submission, files = await _read_submission(request, PriorODSubmission, allow_original=True)
     response.headers.update(_NO_STORE)
     return await run_in_threadpool(_perform, lambda service: service.submit(user, submission, files))
 
@@ -164,10 +167,16 @@ def tutor_applications(response: Response, user: Tutor) -> list[ApplicationSumma
 
 @od_router.get("/hod/applications")
 def hod_applications(
-    response: Response, user: HOD, view: Literal["pending", "history"] | None = None,
+    response: Response, user: HOD, view: Literal["pending", "history", "prior"] | None = None,
 ) -> list[ApplicationSummary]:
     response.headers.update(_NO_STORE)
     return _perform(lambda service: service.list_applications(user, view=view))
+
+
+@od_router.get("/hod/applications/{application_id}/prior")
+def monitor_prior(application_id: UUID, response: Response, user: HOD) -> ApplicationOverview:
+    response.headers.update(_NO_STORE)
+    return _perform(lambda service: service.monitor_prior(user, application_id))
 
 
 @od_router.get("/hod/dashboard")
@@ -195,7 +204,7 @@ def detail(application_id: UUID, response: Response, user: Participant) -> Appli
 
 @od_router.post("/applications/{application_id}/resubmit")
 async def resubmit(application_id: UUID, request: Request, response: Response, user: Student) -> ApplicationDetail:
-    correction, files = await _read_submission(request, ApplicationCorrection, require_original=False)
+    correction, files = await _read_submission(request, ApplicationCorrection, allow_original=False)
     response.headers.update(_NO_STORE)
     return await run_in_threadpool(_perform, lambda service: service.resubmit(user, application_id, correction, files))
 
@@ -227,6 +236,25 @@ def _attachment(file: PrivateUpload) -> Response:
 def evidence(application_id: UUID, response: Response, user: Participant) -> ApplicationEvidenceView:
     response.headers.update(_NO_STORE)
     return _perform(lambda service: service.detail(user, application_id), ODEvidenceService)
+
+
+@od_router.get("/applications/{application_id}/map-od")
+def map_od(application_id: UUID, response: Response, user: Participant) -> MapODView:
+    response.headers.update(_NO_STORE)
+    return _perform(lambda service: service.detail(user, application_id), MapODService)
+
+
+@od_router.post("/applications/{application_id}/days/{day_id}/location")
+async def capture_location(application_id: UUID, day_id: UUID, request: Request,
+                           response: Response, user: Student) -> MapODView:
+    received_at = utc_now()
+    capture = await read_auth_json(request, CaptureRequest)
+    if capture is None:
+        raise _error(422, "Provide valid coordinates, positive GPS accuracy and a capture request ID.")
+    response.headers.update(_NO_STORE)
+    return await run_in_threadpool(
+        _perform, lambda service: service.capture(user, application_id, day_id, capture, received_at), MapODService,
+    )
 
 
 @od_router.post("/applications/{application_id}/days/{day_id}/evidence", status_code=201)

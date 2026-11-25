@@ -6,6 +6,8 @@ import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { Select } from '../components/ui/Select';
 import { EvidencePanel } from '../components/od/EvidencePanel';
+import { VenueMap } from '../components/od/VenueMap';
+import { MapODPanel } from '../components/od/MapODPanel';
 import { API_ENDPOINTS, apiClient } from '../services/api';
 import { correctionRequested, downloadODFile, evidenceOpen, odError, reviewable, statusLabel, statusVariant, useODResource, viewODFile } from '../services/od';
 
@@ -15,24 +17,31 @@ const documentLabels = {
   PARENT_CONSENT: 'Parent consent',
 };
 const decisions = [
-  { value: 'PREAPPROVE', label: 'Preapprove' },
+  { value: 'PREAPPROVE', label: 'Approve Prior OD' },
   { value: 'REJECT', label: 'Reject' },
   { value: 'REQUEST_CORRECTION', label: 'Request correction' },
 ];
 
 const hodDecisions = [{ value: 'APPROVE', label: 'Approve and finalize OD' }, ...decisions.slice(1)];
 
-export function ApplicationDetailPage({ tutor = false, hod = false }) {
+export function ApplicationDetailPage({ tutor = false, hod = false, admin = false, priorMonitor = false }) {
   const { applicationId } = useParams();
-  const { data: app, error, reload } = useODResource(API_ENDPOINTS.APPLICATIONS.DETAIL(applicationId));
+  const endpoint = priorMonitor ? API_ENDPOINTS.HOD.PRIOR(applicationId)
+    : admin ? API_ENDPOINTS.ADMIN.APPLICATION(applicationId) : API_ENDPOINTS.APPLICATIONS.DETAIL(applicationId);
+  const { data: app, error, reload } = useODResource(endpoint);
   const [action, setAction] = useState('');
   const [remarks, setRemarks] = useState('');
   const [saving, setSaving] = useState(false);
   const [actionError, setActionError] = useState('');
   const dialog = useRef(null);
   const { state } = useLocation();
-  const base = hod ? '/hod/applications' : tutor ? '/tutor/applications' : '/student/applications';
-  const back = hod && (state?.history || (app && app.status !== 'UNDER_HOD_REVIEW')) ? '/hod/history' : base;
+  const base = admin ? '/admin/applications' : hod ? '/hod/applications' : tutor ? '/tutor/applications' : '/student/applications';
+  const back = priorMonitor ? '/hod/prior-od'
+    : hod && (state?.history || (app && app.status !== 'UNDER_HOD_REVIEW')) ? '/hod/history' : base;
+  const rejectedEvidence = app?.status === 'REJECTED' && app.history.some(({ from_status, to_status }) =>
+    evidenceOpen.has(from_status) || evidenceOpen.has(to_status) || from_status === 'UNDER_HOD_REVIEW');
+  const hasEvidenceStage = app && (evidenceOpen.has(app.status) ||
+    ['UNDER_HOD_REVIEW', 'HOD_CORRECTION_REQUESTED', 'OD_FINALIZED'].includes(app.status) || rejectedEvidence);
   const tutorDecisions = app?.status === 'UNDER_TUTOR_CORRECTION_REVIEW'
     ? [{ value: 'PREAPPROVE', label: 'Forward correction to HOD' }, ...decisions.slice(1)]
     : decisions;
@@ -76,6 +85,7 @@ export function ApplicationDetailPage({ tutor = false, hod = false }) {
       {error && <p role="alert" className="text-sm text-rose-700">{error}</p>}
       {actionError && <p role="alert" className="text-sm text-rose-700">{actionError}</p>}
       {!app && !error && <p role="status" className="text-sm">Loading application…</p>}
+      {state?.submissionNotice && <p role="status" className="text-sm text-brand-primary">{state.submissionNotice}</p>}
       {app && (
         <>
           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -89,7 +99,11 @@ export function ApplicationDetailPage({ tutor = false, hod = false }) {
             <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
               <div><dt className="text-xs text-brand-muted">Student</dt><dd>{app.student_name} ({app.student_roll_number})</dd></div>
               <div><dt className="text-xs text-brand-muted">Assigned tutor</dt><dd>{app.tutor_name}</dd></div>
-              <div><dt className="text-xs text-brand-muted">Host</dt><dd>{app.host_institution}</dd></div>
+              {admin && <>
+                <div><dt className="text-xs text-brand-muted">Department</dt><dd>{app.department_name || 'Unavailable'}</dd></div>
+                <div><dt className="text-xs text-brand-muted">Current department HOD</dt><dd>{app.current_hod_name || 'Unassigned'}</dd></div>
+              </>}
+              <div><dt className="text-xs text-brand-muted">Organized by</dt><dd>{app.host_institution}</dd></div>
               <div><dt className="text-xs text-brand-muted">Venue</dt><dd>{app.venue_location}</dd></div>
               <div><dt className="text-xs text-brand-muted">Event category</dt>
                 <dd className="capitalize">{app.event_category.replaceAll('_', ' ').toLowerCase()}</dd>
@@ -102,7 +116,21 @@ export function ApplicationDetailPage({ tutor = false, hod = false }) {
               </div>
             </dl>
           </Card>
-          <Card title="Documents">
+          {app.expected_venue && (hasEvidenceStage && (tutor || hod) ? (
+            <MapODPanel key={app.id} applicationId={app.id} readOnly />
+          ) : (
+            <Card title="Expected venue pin" bodyClassName="space-y-2">
+              <VenueMap venue={app.expected_venue} basemap />
+              <p className="text-sm">{app.expected_venue.latitude.toFixed(6)}, {app.expected_venue.longitude.toFixed(6)}</p>
+              {tutor && ['SUBMITTED', 'UNDER_TUTOR_REVIEW'].includes(app.status) && (
+                <p className="text-sm text-brand-muted">Review the venue pin before approval. Request a correction if it is incorrect.</p>
+              )}
+            </Card>
+          ))}
+          {!admin && !tutor && !hod && app.expected_venue && app.post_od_eligible && (
+            <Link className="text-sm font-medium text-brand-primary underline" to={'/student/post-od/' + app.id + '/map'}>Open Map OD</Link>
+          )}
+          {!admin && !priorMonitor && <Card title="Documents">
             {app.documents.length ? (
               <ul className="space-y-3">
                 {app.documents.map((doc) => (
@@ -119,7 +147,7 @@ export function ApplicationDetailPage({ tutor = false, hod = false }) {
                 ))}
               </ul>
             ) : <p className="text-sm text-brand-muted">No documents available.</p>}
-          </Card>
+          </Card>}
           <Card title="Status history">
             {app.history.length ? (
               <ol className="space-y-3">
@@ -144,14 +172,17 @@ export function ApplicationDetailPage({ tutor = false, hod = false }) {
           {app.status === 'UNDER_HOD_REVIEW' && !hod && (
             <p className="text-sm text-brand-muted">The tutor verified all event days. The application is awaiting the department HOD’s decision.</p>
           )}
-          {(evidenceOpen.has(app.status) || ['UNDER_HOD_REVIEW', 'HOD_CORRECTION_REQUESTED', 'OD_FINALIZED', 'REJECTED'].includes(app.status)) && (
+          {!admin && !hod && app.post_od_eligible && !app.documents.some((document) => document.document_type === 'ORIGINAL_SIGNED_OD_FORM') && (
+            <p className="text-sm text-brand-muted">The signed OD form is required before HOD review. Upload will be available with the full Post OD submission.</p>
+          )}
+          {!admin && !priorMonitor && hasEvidenceStage && (
             <EvidencePanel key={app.id} applicationId={app.id} tutor={tutor} readOnly={hod} onChange={reload} />
           )}
-          {!tutor && !hod && correctionRequested.has(app.status) && (
+          {!admin && !tutor && !hod && correctionRequested.has(app.status) && (
             <Link className="inline-block rounded-md bg-brand-primary px-4 py-2 text-sm text-white"
               to={`${base}/${app.id}/correct`}>Correct and resubmit</Link>
           )}
-          {hod && app.status === 'UNDER_HOD_REVIEW' && (
+          {hod && !priorMonitor && app.status === 'UNDER_HOD_REVIEW' && (
             <Card title="HOD decision">
               <Button onClick={() => { setActionError(''); dialog.current.showModal(); }}>Record decision</Button>
               <dialog ref={dialog} aria-labelledby="hod-decision-title"

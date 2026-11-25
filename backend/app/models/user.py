@@ -40,6 +40,7 @@ class User(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email = Column(String(255), unique=True, nullable=False, index=True)
+    hod_display_name = Column(String(150), nullable=True)
     hashed_password = Column(String(255), nullable=True)
     role = Column(SQLEnum(UserRole, name="user_role_enum"), nullable=False, index=True)
     account_status = Column(
@@ -85,6 +86,11 @@ class StudentProfile(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
     roll_number = Column(String(50), unique=True, nullable=False, index=True)
+    gender = Column(String(6), CheckConstraint("gender IN ('MALE', 'FEMALE')", name="ck_student_gender"))
+    accommodation = Column(String(15), CheckConstraint(
+        "accommodation IN ('COLLEGE_HOSTEL', 'OUTSIDE_STAYING', 'GUARDIAN', 'OTHER')",
+        name="ck_student_accommodation",
+    ))
     register_number = Column(String(50), unique=True, nullable=False, index=True)
     full_name = Column(String(150), nullable=False)
     phone_number = Column(String(20), nullable=True)

@@ -2,6 +2,90 @@
 
 The Student, Tutor, HOD, and Admin features are implemented in the localhost demo. The phase notes below describe the earlier database foundation and its historical verification. See the current workflow, migration status, and deployment limits. [HOD approval guide](HOD_APPROVAL.md)
 
+## Campus OD 3.0 Phase 1
+
+Phase 1 runs in the isolated SQLite demo. **User Management** invites students, faculty, HODs, and administrators, edits their records, manages student enrollments, and disables accounts. Registrar and Principal use individual ADMIN accounts. **College Records** manages departments, classes, and academic years. **Academic Assignments** manages tutors and department HODs. **OD Monitoring** shows application details and history without private documents, evidence, or workflow controls.
+
+Account totals include active, invited, and disabled accounts. The dashboard displays each count separately. Department totals include active and inactive departments. OD metrics count all applications by their current status, including applications associated with disabled accounts.
+
+Student profiles hold current demographic classifications across academic years. Gender is Male, Female, or unclassified. Accommodation is College Hostel, Outside Staying (private hostel, PG, or rented room), Guardian (relative or local guardian), Other, or unclassified. Missing values are stored as null. Historical accommodation by academic year would require a separate design. A student has one enrollment row per academic year. A same-year move updates that row and records the previous class in admin audit history. Existing OD tutor and department ownership stay recorded on the application.
+
+The SQLite demo adds missing columns and the audit table at startup, without resetting existing records. PostgreSQL revision `0005_admin_records` follows `0004_hod_approval`. It adds nullable demographic and HOD display-name fields, department and class activity flags, and an administrative audit table. HOD name edits preserve the names recorded on earlier assignment and decision history. The audit table uses RLS and revokes client grants. Existing department and class rows become active. Review static SQL from the backend directory:
+
+```powershell
+.\venv\Scripts\python.exe -B -m alembic upgrade 0004_hod_approval:0005_admin_records --sql
+```
+
+Live Supabase was last verified at `0003_account_activation` during Phase 0. Review both pending revisions and rehearse them against disposable PostgreSQL before scheduling a separately approved deployment. The demo uses the existing encrypted invitation outbox. Production roster authorization, invitation delivery, and the COE parser remain deferred.
+
+Admin routes below are under `/api/v1/admin`. Existing fixture provisioning and assignment routes remain available.
+
+- `POST /accounts/{student|faculty|hod|admin}` creates an invited account. A new HOD invitation reserves the initial department assignment.
+- `GET /users`, `PUT /users/{id}`, and `POST /users/{id}/deactivate` manage account records. Sign-in email and role stay fixed. Tutor accounts with open OD applications must resolve those applications before deactivation. Deactivating an active account revokes its sessions. HOD deactivation closes the current assignment and retains its history.
+- `GET /catalog` and `POST /catalog/{kind}` / `PUT /catalog/{kind}/{id}` manage departments, classes, and academic years. A department can be made inactive once its classes are inactive and its HOD assignment is ended. Selecting a current year clears other current-year flags.
+- `PUT /students/{id}/enrollment` assigns, changes, or ends the enrollment in the selected class's academic year.
+- `GET /metrics`, `GET /applications`, and `GET /applications/{id}` provide read-only summaries and monitoring. Participant document and evidence routes retain their existing access checks.
+
+The API checks ADMIN role, demo loopback access, and origin and CSRF protections on writes. Changes are audited in the same transaction as the record update. Admin monitoring has no decision permissions.
+
+All 164 backend tests and 12 frontend tests passed, and the production frontend build succeeded. Verification covered a legacy SQLite upgrade, manual account and catalog management, duplicate prevention, assignment and enrollment changes, deactivation, metrics, and read-only OD access. The isolated browser smoke test verified Admin sign-in, database-backed metrics, the student demographic form and demo prefill, college records, and the OD monitoring page. PostgreSQL SQL was generated offline.
+
+## Campus OD 3.0 Phase 2
+
+The Faculty portal has three navigation sections: **Dashboard**, **OD Approval**, and **Reports**. Dashboard shows Total Students, Hostel Students, Outside Staying, and Guardian. Each card shows a total and counts for boys and girls. Where gender is missing, the student contributes to the category total and the dashboard explains why the breakdown can be smaller. An assigned class with no eligible enrollment shows zero counts. Reports is a Phase 7 placeholder. OD Approval retains the existing list, detail, review, and evidence workflow.
+
+`GET /api/v1/tutor/dashboard` returns the authenticated Faculty member's selectable classes and the first class's aggregate statistics, ordered by class name. Pass `class_id` to select a class. The backend requires the `TUTOR` role and checks the active faculty account, tutor assignment, class, department, and current academic year. Valid UUIDs outside that scope return 404, malformed UUIDs return 422, and other signed-in roles receive 403. A faculty member with no current assignments receives an empty class list and null statistics. The response contains no student identifiers or individual demographic values.
+
+Counts come from distinct student profiles with active enrollments matching the class, academic year, and department. Invited, active, and disabled student login accounts count while academically enrolled. Ending an enrollment removes that student from the dashboard. `COLLEGE_HOSTEL` means the college hostel, `OUTSIDE_STAYING` covers private hostels, PGs, and rented rooms, and `GUARDIAN` covers relatives and local guardians. `OTHER` and missing accommodation contribute to Total Students. Only recorded `MALE` and `FEMALE` values contribute to the respective Boys and Girls counts.
+
+Phase 2 uses the Phase 1 schema and calculates counts on request. No new migration is required. The head is `0005_admin_records`. All 165 backend tests and 12 frontend tests passed, along with the production frontend build and `git diff --check`. A fictional SQLite browser smoke test verified class switching, zero counts, missing gender, the existing OD detail view, the Reports placeholder, and the mobile layout and menu at 390 px. Live Supabase validation and Phase 7 report generation and exports remain deferred.
+
+## Campus OD 3.0 Phase 3
+
+Students use **Prior OD** to submit an event name, organizer, venue, category, purpose, and one or more distinct event dates with sessions. Optional invitation and consent documents use existing private storage. The application retains its student owner, tutor and department snapshot, and status history. Faculty use **OD Approval** to preapprove or reject Prior OD with remarks, or request corrections. Preapproval opens compatible participation evidence and the **Post OD** list.
+
+The same application record carries both stages. `POST /api/v1/applications` accepts multipart event details without `original_form`. Existing API clients may still send that validated attachment for compatibility. The new Prior OD screen never asks for it. Application summaries and details report `post_od_eligible` for open evidence states and HOD corrections. Early and rejected Prior OD cannot open or submit participation evidence. Historical evidence stays available to its authorized participants.
+
+HOD **Prior OD Monitoring** uses `GET /api/v1/hod/applications?view=prior` and `GET /api/v1/hod/applications/{id}/prior`. The server uses the HOD's active department assignment and returns event details and status history without private file metadata or decision controls. Final HOD decisions stay restricted to applications in the final queue. Admin monitoring remains read-only.
+
+Until Phase 5, a new application without a signed form can collect and verify evidence, then stays under tutor verification. Both forwarding and final approval check for the signed form, and final approval also requires every event day to be verified. Existing signed and in-progress applications continue through Option B. Completed records and their attachments are preserved.
+
+Phase 3 uses the existing schema and adds no migrations. The repository head is `0005_admin_records`. Map OD is Phase 4. The explicit Post OD submission and required signed-form upload are Phase 5.
+
+All 167 backend tests and 12 frontend tests passed. The production frontend build and `git diff --check` passed. The fictional SQLite browser walkthrough covered a two-date submission, duplicate-date validation, date removal, department HOD read-only monitoring, Faculty preapproval, and the student's Post OD eligibility before and after approval. The 390 px Prior OD form fit without horizontal overflow.
+
+## Campus OD 3.0 Phase 4
+
+**Prior OD** requires an expected venue pin in addition to the written venue. Students can place or move the pin on a Leaflet map or enter venue coordinates. Assigned Faculty can inspect the pin and request a Prior OD correction before approval. The approved pin stays fixed through evidence collection and HOD corrections. Legacy applications without coordinates retain their earlier evidence workflow and show that geographic verification is unavailable.
+
+**Post OD → Open Map OD** opens a separate, single-capture action for each approved event day. The server checks the authenticated owner, application state, approved venue, and event day. The trusted UTC server receipt must fall on the selected date in Asia/Kolkata, starting at 00:00 IST and ending just before the next midnight. Browser timestamps are optional and informational. Existing timestamp columns retain the UTC storage convention and API timestamps include the UTC offset. The browser requests a fresh position only when the student selects Capture location and displays times in IST.
+
+The server computes Haversine distance using a mean Earth radius of 6,371,008.8 metres. **250 m** distance and **100 m** reported accuracy are inclusive defaults configured by `MAP_OD_RADIUS_METRES` and `MAP_OD_MAX_ACCURACY_METRES`. Both checks must pass. Authorized, well-formed captures made on the event date are saved as passed, outside the boundary, poor accuracy, or both. Failed checks stay visible to authorized Faculty and HOD reviewers. Browser GPS and timestamps can be inaccurate or spoofed, so supporting evidence and human decisions remain necessary.
+
+A draft evidence row per event day keeps independent GPS attempts. Within the allowed date and workflow stage, resending the same request ID with the same reading returns the original attempt. The latest passing attempt is selected, or the latest flagged attempt if none passed. A failed retry cannot displace a passing capture. The file submission references the chosen passing attempt without copying it. Later captures do not rewrite that file evidence reference. Pinned applications require a passing capture for each day's file evidence under the temporary Phase 4 integration. GPS checks never change the application status by themselves. The signed-form, tutor-verification, and final HOD gates still apply.
+
+### Phase 4 API and migration
+
+- `POST /api/v1/applications` requires `expected_venue` in the multipart details. Owning Student and assigned Faculty detail views can see the pin. HOD gets the pin at the authorized evidence stage.
+- `GET /api/v1/applications/{id}/map-od` provides scoped event-day progress, outcomes, policy thresholds, and capture history. `POST /api/v1/applications/{id}/days/{day_id}/location` accepts the coordinates, positive accuracy, optional browser timestamp, and request ID. Admin and HOD Prior OD monitoring do not expose the capture history.
+- Migration `0006_map_od` extends existing application, evidence, and location tables. It adds nullable pins, a draft marker with a unique per-day index, a capture reference, historical results and thresholds, and a unique request key. The SQLite demo adds the same fields at startup. Existing RLS and grants cover the affected tables. No existing records or files are rewritten.
+
+Generate PostgreSQL SQL offline from `backend` before a disposable PostgreSQL rehearsal:
+
+```powershell
+.\venv\Scripts\python.exe -B -m alembic upgrade 0005_admin_records:0006_map_od --sql
+```
+
+### Basemap and location privacy
+
+Leaflet 1.9.4 renders the optional venue basemap. Vite development uses OpenStreetMap standard tiles by default. A production build needs `VITE_MAP_OD_TILE_URL` and `VITE_MAP_OD_TILE_ATTRIBUTION` for a provisioned provider. An empty URL disables tiles. Tile failure leaves the interactive map and manual coordinate inputs available. A basemap provider can see the browser's IP address and requested map area. Student capture maps render locally without external tiles, including when focused on a captured position. No external geocoder, background location tracking, or public capture URLs are used. Use HTTPS or localhost with browser location permission. [Leaflet documentation](https://leafletjs.com/reference-1.9.4.html) · [OpenStreetMap tile policy](https://operations.osmfoundation.org/policies/tiles/) · [Browser Geolocation specification](https://www.w3.org/TR/geolocation/)
+
+Full Post OD submission and signed-form upload remain Phase 5. Application-level evidence review remains Phase 6. Live Supabase migration and real-device GPS testing remain pending.
+
+All 173 backend tests and 15 frontend tests passed. The production build, `git diff --check`, and offline PostgreSQL SQL generation passed. The localhost browser smoke test used simulated GPS and a local failing tile endpoint. It verified pin selection, Faculty review, approval gating, event-day selection, passing and flagged captures, retry preservation, simulated permission denial, tile fallback, and the 390 px layout.
+
+## Campus OD 2.0 historical notes
+
 **Sri Krishna Arts and Science College (SKASC)**  
 *Smart On-Duty Management System*
 

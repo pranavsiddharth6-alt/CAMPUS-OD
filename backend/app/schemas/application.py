@@ -80,6 +80,13 @@ class SubmissionDay(BaseModel):
     session: DaySession = DaySession.FULL_DAY
 
 
+class Coordinates(BaseModel):
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    latitude: float = Field(strict=True, ge=-90, le=90, allow_inf_nan=False)
+    longitude: float = Field(strict=True, ge=-180, le=180, allow_inf_nan=False)
+
+
 class ApplicationSubmission(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
@@ -89,12 +96,17 @@ class ApplicationSubmission(BaseModel):
     venue_location: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
     description: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=3000)]
     event_days: list[SubmissionDay] = Field(min_length=1)
+    expected_venue: Coordinates | None = None
 
     @model_validator(mode="after")
     def unique_event_dates(self):
         if len({day.event_date for day in self.event_days}) != len(self.event_days):
             raise ValueError("Event dates must be distinct.")
         return self
+
+
+class PriorODSubmission(ApplicationSubmission):
+    expected_venue: Coordinates
 
 
 class ApplicationCorrection(ApplicationSubmission):
@@ -138,6 +150,7 @@ class ApplicationSummary(BaseModel):
     end_date: date
     total_days: int
     status: ApplicationStatus
+    post_od_eligible: bool
 
 
 class ApplicationDocumentResponse(BaseModel):
@@ -157,10 +170,14 @@ class ApplicationHistoryEntry(BaseModel):
     hod_name: str | None = None
 
 
-class ApplicationDetail(ApplicationSummary):
+class ApplicationOverview(ApplicationSummary):
     host_institution: str
     description: str
     event_days: list[SubmissionDay]
-    documents: list[ApplicationDocumentResponse]
     history: list[ApplicationHistoryEntry]
+
+
+class ApplicationDetail(ApplicationOverview):
+    expected_venue: Coordinates | None = None
+    documents: list[ApplicationDocumentResponse]
     revision: uuid.UUID | None

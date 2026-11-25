@@ -1,6 +1,6 @@
 from pydantic_settings import BaseSettings
-from typing import List, Union
-from pydantic import PositiveInt, SecretStr, field_validator
+from typing import Annotated, List, Union
+from pydantic import Field, FiniteFloat, PositiveInt, SecretStr, field_validator
 import os
 from pathlib import Path
 
@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     # Storage
     STORAGE_DIR: str = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "storage")
     MAX_UPLOAD_SIZE_BYTES: int = 5 * 1024 * 1024  # 5MB
+    MAP_OD_RADIUS_METRES: Annotated[FiniteFloat, Field(gt=0)] = 250
+    MAP_OD_MAX_ACCURACY_METRES: Annotated[FiniteFloat, Field(gt=0)] = 100
 
     @field_validator("CORS_ORIGINS", mode="after")
     @classmethod

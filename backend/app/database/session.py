@@ -37,7 +37,7 @@ def get_engine():
     global _engine, _SessionLocal
     if _engine is None:
         if settings.ENVIRONMENT == "local-demo":
-            from app.database.demo import DemoSession, create_demo_engine, upgrade_demo_hod
+            from app.database.demo import DemoSession, create_demo_engine, upgrade_demo_admin, upgrade_demo_hod, upgrade_demo_map_od
 
             directory = settings.LOCAL_DEMO_DIR
             if directory is None or not (directory / "campus_od.sqlite3").is_file():
@@ -47,6 +47,8 @@ def get_engine():
                     engine = create_demo_engine(directory)
                     try:
                         upgrade_demo_hod(engine)
+                        upgrade_demo_admin(engine)
+                        upgrade_demo_map_od(engine)
                     except Exception:
                         engine.dispose()
                         raise

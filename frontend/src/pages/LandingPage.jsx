@@ -79,13 +79,13 @@ export function LandingPage() {
 
         {/* Tutor Gateway */}
         <Card
-          title="Class Tutor Portal"
+          title="Faculty Portal"
           subtitle="Verification & endorsement"
           icon={UserCheck}
           footer={
             <Link to="/tutor/dashboard">
               <Button variant="outline" size="sm" className="w-full justify-between">
-                <span>Enter Tutor Portal</span>
+                <span>Enter Faculty Portal</span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </Button>
             </Link>

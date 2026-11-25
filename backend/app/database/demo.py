@@ -73,3 +73,63 @@ def upgrade_demo_hod(engine):
                 ALTER TABLE application_status_history
                 ADD COLUMN hod_assignment_id UUID REFERENCES hod_assignments(id) ON DELETE RESTRICT
             """)
+
+
+def upgrade_demo_admin(engine):
+    from app.models.admin_audit import AdminAudit
+
+    additions = {
+        "users": {"hod_display_name": "VARCHAR(150)"},
+        "student_profiles": {
+            "gender": "VARCHAR(6) CONSTRAINT ck_student_gender CHECK (gender IN ('MALE', 'FEMALE'))",
+            "accommodation": "VARCHAR(15) CONSTRAINT ck_student_accommodation "
+                             "CHECK (accommodation IN ('COLLEGE_HOSTEL', 'OUTSIDE_STAYING', 'GUARDIAN', 'OTHER'))",
+        },
+        "departments": {"is_active": "BOOLEAN NOT NULL DEFAULT true"},
+        "classes": {"is_active": "BOOLEAN NOT NULL DEFAULT true"},
+    }
+    with engine.begin() as db:
+        schema = inspect(db)
+        for table, columns in additions.items():
+            existing = {column["name"] for column in schema.get_columns(table)}
+            for name, definition in columns.items():
+                if name not in existing:
+                    db.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        AdminAudit.__table__.create(db, checkfirst=True)
+
+
+def upgrade_demo_map_od(engine):
+    additions = {
+        "od_applications": {
+            "expected_venue_latitude": "FLOAT CONSTRAINT ck_od_venue_latitude CHECK (expected_venue_latitude BETWEEN -90 AND 90)",
+            "expected_venue_longitude": "FLOAT CONSTRAINT ck_od_venue_longitude CHECK (expected_venue_longitude BETWEEN -180 AND 180)",
+        },
+        "evidence_submissions": {
+            "is_location_draft": "BOOLEAN NOT NULL DEFAULT false",
+            "map_capture_id": "UUID REFERENCES location_captures(id) ON DELETE RESTRICT",
+        },
+        "location_captures": {
+            "distance_metres": "FLOAT",
+            "allowed_radius_metres": "FLOAT",
+            "allowed_accuracy_metres": "FLOAT",
+            "verification_result": "VARCHAR(32)",
+            "browser_time_present": "BOOLEAN",
+            "request_key": "VARCHAR(36)",
+        },
+    }
+    with engine.begin() as db:
+        schema = inspect(db)
+        if not schema.has_table("od_applications"):
+            return
+        for table, columns in additions.items():
+            existing = {column["name"] for column in schema.get_columns(table)}
+            for name, definition in columns.items():
+                if name not in existing:
+                    db.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        db.exec_driver_sql("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_event_day_location_draft
+            ON evidence_submissions (event_day_id) WHERE is_location_draft IS TRUE
+        """)
+        db.exec_driver_sql("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ix_location_captures_request_key ON location_captures (request_key)
+        """)

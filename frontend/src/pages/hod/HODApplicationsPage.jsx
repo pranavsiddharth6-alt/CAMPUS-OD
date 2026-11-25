@@ -32,6 +32,7 @@ export function HODDashboardPage() {
         </div>
       )}
       <div className="flex flex-wrap gap-4 text-sm">
+        <Link className={linkStyle} to="/hod/prior-od">Monitor Prior OD</Link>
         <Link className={linkStyle} to="/hod/applications">Review pending requests</Link>
         <Link className={linkStyle} to="/hod/history">View decision history</Link>
       </div>
@@ -39,19 +40,19 @@ export function HODDashboardPage() {
   );
 }
 
-export function HODApplicationsPage({ history = false }) {
-  const view = history ? 'history' : 'pending';
+export function HODApplicationsPage({ history = false, prior = false }) {
+  const view = prior ? 'prior' : history ? 'history' : 'pending';
   const { data: records, error, reload } = useODResource(API_ENDPOINTS.HOD.APPLICATIONS + '?view=' + view);
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between gap-3">
-        <h1 className="text-xl font-bold text-brand-dark">{history ? 'Decision History' : 'Pending OD Requests'}</h1>
+        <h1 className="text-xl font-bold text-brand-dark">{prior ? 'Prior OD Monitoring' : history ? 'Decision History' : 'Pending OD Requests'}</h1>
         <Button variant="secondary" onClick={reload}>Refresh</Button>
       </div>
       {error && <p role="alert" className="text-sm text-rose-700">{error}</p>}
       {!records && !error && <p role="status" className="text-sm">Loading applications…</p>}
       {records?.length === 0 && (
-        <Card><p className="text-sm text-brand-muted">{history ? 'No decisions recorded yet.' : 'No applications are awaiting HOD review.'}</p></Card>
+        <Card><p className="text-sm text-brand-muted">{prior ? 'No applications in your department yet.' : history ? 'No decisions recorded yet.' : 'No applications are awaiting HOD review.'}</p></Card>
       )}
       <ul className="grid gap-3 xl:grid-cols-2">
         {records?.map((app) => (
@@ -59,7 +60,7 @@ export function HODApplicationsPage({ history = false }) {
             <Card>
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0 break-words text-sm">
-                  <Link className={linkStyle} state={{ history }} to={'/hod/applications/' + app.id}>{app.event_name}</Link>
+                  <Link className={linkStyle} state={{ history }} to={(prior ? '/hod/prior-od/' : '/hod/applications/') + app.id}>{app.event_name}</Link>
                   <p>{app.student_name} ({app.student_roll_number})</p>
                   <p className="text-xs text-brand-muted">{dateRange(app)} · {app.venue_location}</p>
                 </div>

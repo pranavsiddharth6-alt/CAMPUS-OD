@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
 from app.core.passwords import hash_new_password
-from app.database.demo import create_demo_engine, upgrade_demo_hod
+from app.database.demo import create_demo_engine, upgrade_demo_admin, upgrade_demo_hod, upgrade_demo_map_od
 from app.database.session import Base
 from app.models import (
     AcademicYear, AccountActionToken, AdminProfile, AuthSession, Class, Department, RefreshToken,
@@ -56,6 +56,8 @@ def initialize_demo(directory: Path) -> None:
                 StudentClassEnrollment, AuthSession, RefreshToken, AccountActionToken, *_OD_MODELS,
             )])
         upgrade_demo_hod(engine)
+        upgrade_demo_admin(engine)
+        upgrade_demo_map_od(engine)
         with sessionmaker(engine).begin() as db:
             seed_demo_academics(db)
     finally:
@@ -73,6 +75,7 @@ def bootstrap_demo_admin(directory: Path, password: str) -> None:
     password_hash = hash_new_password(password)
     engine = create_demo_engine(directory)
     try:
+        upgrade_demo_admin(engine)
         with sessionmaker(engine).begin() as db:
             if db.scalar(select(User.id).where(User.role == UserRole.ADMIN).limit(1)) is not None:
                 raise ValueError("A local demo administrator already exists.")
@@ -93,6 +96,8 @@ def prepare_demo_od(directory: Path) -> None:
         with engine.begin() as connection:
             Base.metadata.create_all(connection, tables=[model.__table__ for model in _OD_MODELS])
         upgrade_demo_hod(engine)
+        upgrade_demo_admin(engine)
+        upgrade_demo_map_od(engine)
         with sessionmaker(engine).begin() as db:
             tutor_id = db.scalar(select(TutorProfile.id).join(TutorProfile.user).where(
                 User.email == DEMO_TUTOR.email, User.role == UserRole.TUTOR, User.account_status == AccountStatus.ACTIVE,

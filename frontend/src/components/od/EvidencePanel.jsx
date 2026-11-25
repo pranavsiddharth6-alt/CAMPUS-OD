@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
 import { Input } from '../ui/Input';
 import { Select } from '../ui/Select';
 import { API_ENDPOINTS, apiClient } from '../../services/api';
-import { captureLocation } from '../../services/location';
+import { captureLocation, formatIST } from '../../services/location';
 import { downloadODFile, evidenceOpen, odError, useODResource, viewODFile } from '../../services/od';
 
 const states = {
@@ -28,16 +29,18 @@ function GPSDetails({ gps }) {
     <dl className="grid gap-2 text-xs sm:grid-cols-2">
       <div><dt className="text-brand-muted">Coordinates</dt><dd>{gps.latitude.toFixed(6)}, {gps.longitude.toFixed(6)}</dd></div>
       <div><dt className="text-brand-muted">Reported accuracy</dt><dd>{gps.accuracy_meters == null ? 'Unavailable' : `${gps.accuracy_meters} m`}</dd></div>
-      <div><dt className="text-brand-muted">Device capture time</dt><dd>{formatTime(gps.captured_at)}</dd></div>
+      <div><dt className="text-brand-muted">Capture time (IST)</dt><dd>{formatIST(gps.captured_at)}</dd></div>
+      <div><dt className="text-brand-muted">Location policy</dt><dd>{gps.verification_result === 'PASSED' ? 'Map OD check passed' : 'Legacy capture · no geographic verification'}</dd></div>
     </dl>
   );
 }
 
-function EvidenceForm({ applicationId, day, onSave }) {
+function EvidenceForm({ applicationId, day, onSave, usesMapOD }) {
   const [gps, setGPS] = useState(null);
   const [locating, setLocating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const locationReady = usesMapOD ? day.map_capture_passed : Boolean(gps);
 
   async function locate() {
     setError('');
@@ -54,7 +57,7 @@ function EvidenceForm({ applicationId, day, onSave }) {
 
   async function submit(event) {
     event.preventDefault();
-    if (!gps) return;
+    if (!locationReady) return;
     const fields = new FormData(event.currentTarget);
     const body = new FormData();
     body.append('details', JSON.stringify({ gps, notes: fields.get('notes'), submitted_at: new Date().toISOString() }));
@@ -74,9 +77,14 @@ function EvidenceForm({ applicationId, day, onSave }) {
 
   return (
     <form className="space-y-3 border-t border-brand-border pt-3" onSubmit={submit}>
-      <Button variant="secondary" disabled={locating || saving} onClick={locate}>
+      {usesMapOD ? <p className="text-sm">
+        {locationReady ? 'A passing Map OD capture is on file for this event day.' :
+          <Link className="text-brand-primary underline" to={'/student/post-od/' + applicationId + '/map'}>
+            Save a passing Map OD capture for this event day
+          </Link>}
+      </p> : <Button variant="secondary" disabled={locating || saving} onClick={locate}>
         {locating ? 'Capturing location…' : gps ? 'Capture location again' : 'Capture location'}
-      </Button>
+      </Button>}
       {gps && <GPSDetails gps={gps} />}
       <Input id={`venue-photo-${day.id}`} label="GPS Map Camera venue photo" type="file" name="venue_photo"
         accept=".png,.jpg,.jpeg" required />
@@ -84,7 +92,7 @@ function EvidenceForm({ applicationId, day, onSave }) {
         accept=".pdf,.png,.jpg,.jpeg" required />
       <Input id={`evidence-notes-${day.id}`} label="Evidence notes (optional)" name="notes" maxLength={2000} />
       {error && <p role="alert" className="text-xs text-rose-700">{error}</p>}
-      <Button type="submit" disabled={!gps || saving}>{saving ? 'Saving…' : 'Submit evidence'}</Button>
+      <Button type="submit" disabled={!locationReady || saving}>{saving ? 'Saving…' : 'Submit evidence'}</Button>
     </form>
   );
 }
@@ -200,7 +208,8 @@ export function EvidencePanel({ applicationId, tutor, readOnly, onChange }) {
                 </details>
               )}
               {evidenceOpen.has(data.status) && !tutor && !readOnly && ['NOT_SUBMITTED', 'CORRECTION_REQUIRED'].includes(day.state) && (
-                <EvidenceForm key={`upload-${latest?.id ?? day.id}`} applicationId={applicationId} day={day} onSave={saved} />
+                <EvidenceForm key={`upload-${latest?.id ?? day.id}`} applicationId={applicationId}
+                  day={day} usesMapOD={data.uses_map_od} onSave={saved} />
               )}
               {data.status === 'UNDER_TUTOR_CORRECTION_REVIEW' && tutor && day.state === 'VERIFIED' && (
                 <details className="text-sm">

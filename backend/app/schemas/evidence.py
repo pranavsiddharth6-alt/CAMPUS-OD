@@ -74,7 +74,7 @@ class EvidenceGPS(BaseModel):
 class EvidenceUploadRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
-    gps: EvidenceGPS
+    gps: EvidenceGPS | None = None
     submitted_at: AwareDatetime
     notes: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] = ""
 
@@ -97,6 +97,7 @@ class EvidenceGPSView(BaseModel):
     longitude: float
     accuracy_meters: float | None
     captured_at: datetime
+    verification_result: str | None = None
 
 
 class EvidenceReviewView(BaseModel):
@@ -122,8 +123,10 @@ class EventDayEvidenceView(BaseModel):
     session: DaySession
     state: Literal["NOT_SUBMITTED", "AWAITING_REVIEW", "CORRECTION_REQUIRED", "VERIFIED", "REJECTED"]
     attempts: list[EvidenceAttemptView]
+    map_capture_passed: bool = False
 
 
 class ApplicationEvidenceView(BaseModel):
     status: ApplicationStatus
     days: list[EventDayEvidenceView]
+    uses_map_od: bool = False

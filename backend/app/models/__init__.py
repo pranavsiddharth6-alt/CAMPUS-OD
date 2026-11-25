@@ -44,6 +44,7 @@ from app.models.evidence import (
     EvidenceReview,
 )
 from app.models.notification import Notification
+from app.models.admin_audit import AdminAudit
 
 __all__ = [
     # Enums

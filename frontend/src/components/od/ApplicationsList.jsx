@@ -15,8 +15,7 @@ export function ApplicationsList({ tutor = false, dashboard = false }) {
   const { data, error, reload } = useODResource(tutor ? API_ENDPOINTS.TUTOR.APPLICATIONS : API_ENDPOINTS.APPLICATIONS.LIST);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('');
-  const title = dashboard ? (tutor ? 'Tutor Dashboard' : 'Student Dashboard')
-    : tutor ? 'Assigned OD Applications' : 'My On-Duty Applications';
+  const title = tutor ? 'OD Approval' : dashboard ? 'Student Dashboard' : 'My On-Duty Applications';
   const records = data ?? [];
   const options = [...new Set(records.map(({ status }) => status))]
     .map((status) => ({ value: status, label: statusLabel(status) }));
@@ -32,9 +31,10 @@ export function ApplicationsList({ tutor = false, dashboard = false }) {
         <h1 className="text-xl font-bold text-brand-dark">{title}</h1>
         <div className="flex flex-wrap gap-2">
           <Button variant="secondary" icon={RefreshCw} onClick={reload}>Refresh</Button>
+          {!tutor && dashboard && <Link className="self-center text-sm text-brand-primary underline" to="/student/applications">Application history</Link>}
           {!tutor && (
             <Link className="inline-flex items-center gap-2 rounded-md bg-brand-primary px-4 py-2 text-sm font-medium text-white"
-              to="/student/applications/new"><PlusCircle className="h-4 w-4" /> Apply for OD</Link>
+              to="/student/applications/new"><PlusCircle className="h-4 w-4" /> Submit Prior OD</Link>
           )}
         </div>
       </div>

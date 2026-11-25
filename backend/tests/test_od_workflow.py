@@ -4,7 +4,7 @@ import sqlite3
 import unittest
 from base64 import b64decode
 from contextlib import closing
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -20,12 +20,12 @@ from app.api.v1 import od_applications as api
 from app.core.access_tokens import create_access_token
 from app.core.config import settings
 from app.core.passwords import hash_password
-from app.database.demo import DemoSession, create_demo_engine, upgrade_demo_hod
+from app.database.demo import DemoSession, create_demo_engine, upgrade_demo_hod, upgrade_demo_map_od
 from app.local_demo import initialize_demo, prepare_demo_od
 from app.main import app
-from app.models.academic import ClassTutorAssignment, Department, HODAssignment, StudentClassEnrollment
-from app.models.application import ApplicationStatusHistory, ODApplication
-from app.models.enums import AccountStatus, UserRole
+from app.models.academic import AcademicYear, Class, ClassTutorAssignment, Department, HODAssignment, StudentClassEnrollment
+from app.models.application import ApplicationStatusHistory, EventDay, ODApplication
+from app.models.enums import AccountStatus, ApplicationStatus, UserRole
 from app.models.evidence import EvidenceReview, EvidenceSubmission, LocationCapture, StoredFile
 from app.models.user import StudentProfile, TutorProfile, User
 from app.services.auth_sessions import AuthSessionService
@@ -59,6 +59,8 @@ class ODWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.storage = LocalStorageService(str(directory / "test-private-storage"))
         self.enterContext(patch.object(api, "storage_service", self.storage))
         self.enterContext(patch.object(api, "get_session_factory", return_value=self.factory))
+        self.enterContext(patch("app.api.v1.faculty_dashboard.get_session_factory", return_value=self.factory))
+        self.enterContext(patch("app.api.v1.admin_records.get_session_factory", return_value=self.factory))
         self.enterContext(patch("app.dependencies.auth.get_session_factory", return_value=self.factory))
         self.enterContext(patch("app.api.v1.admin_academics.get_session_factory", return_value=self.factory))
 
@@ -123,7 +125,10 @@ class ODWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.client = await self.enterAsyncContext(AsyncClient(transport=ASGITransport(app=app), base_url="https://localhost"))
 
     async def post(self, *, headers=None, details=None, files=None, path=None):
-        parts = [("details", (None, json.dumps(self.details if details is None else details)))]
+        payload = self.details if details is None else details
+        if path is None:
+            payload = {"expected_venue": {"latitude": 11.0, "longitude": 77.0}, **payload}
+        parts = [("details", (None, json.dumps(payload)))]
         if files is None:
             files = [("original_form", ("signed original.pdf", self.original, "application/pdf"))]
         return await self.client.post(path or self.path, headers=self.student if headers is None else headers,
@@ -140,7 +145,12 @@ class ODWorkflowTests(unittest.IsolatedAsyncioTestCase):
             ("event_invitation", ("invitation.pdf", self.supporting, "application/pdf")),
         ])
         self.assertEqual(response.status_code, 201, response.text)
-        return response.json()
+        application = response.json()
+        # Recreate the venue state of rows submitted before Map OD.
+        with self.factory.begin() as db:
+            legacy = db.get(ODApplication, UUID(application["id"]))
+            legacy.expected_venue_latitude = legacy.expected_venue_longitude = None
+        return application | {"expected_venue": None}
 
     def assert_empty(self):
         with self.factory() as db:
@@ -226,7 +236,9 @@ class ODWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_rejects_invalid_inputs_size_and_spoofed_file_types(self):
         self.assertEqual((await self.post(details=self.details | {"assigned_tutor_id": str(self.tutor_id)})).status_code, 422)
         self.assertEqual((await self.post(details=self.details | {"event_days": [self.details["event_days"][0]] * 2})).status_code, 422)
-        self.assertEqual((await self.post(files=[])).status_code, 422)
+        for field in ("event_name", "host_institution", "venue_location", "description"):
+            missing = {name: value for name, value in self.details.items() if name != field}
+            self.assertEqual((await self.post(details=missing, files=[])).status_code, 422)
         self.assertEqual((await self.post(files=[("original_form", ("doc.pdf", b"fake", "application/pdf"))])).status_code, 415)
         self.assertEqual((await self.post(files=[("original_form", ("doc.pdf", self.original, "image/png"))])).status_code, 415)
         self.assertEqual((await self.post(files=[("original_form", ("../doc.pdf", self.original, "application/pdf"))])).status_code, 422)
@@ -295,6 +307,13 @@ class ODWorkflowTests(unittest.IsolatedAsyncioTestCase):
                                       headers=headers or self.student,
                                       files=[("details", (None, json.dumps(details)))] + files)
 
+    async def map_capture(self, application, day, when, *, headers=None, **changes):
+        capture = {"request_id": str(uuid4()), "latitude": 11.0, "longitude": 77.0,
+                   "accuracy_meters": 70, "captured_at": "2040-01-01T00:00:00Z"} | changes
+        with patch.object(api, "utc_now", return_value=datetime.fromisoformat(when)):
+            return await self.client.post(f"{self.path}/{application['id']}/days/{day['id']}/location",
+                                          headers=headers or self.student, json=capture)
+
     async def review_day(self, application, day, attempt, status, *, headers=None, remarks="Fictional evidence remarks."):
         return await self.client.post(
             f"{self.tutor_path}/{application['id']}/days/{day['id']}/evidence/{attempt['id']}/review",
@@ -330,6 +349,7 @@ class ODWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_attempt["gps"], {
             "latitude": 11.125, "longitude": 77.25, "accuracy_meters": 275.5,
             "captured_at": "2026-11-01T10:00:00Z",
+            "verification_result": None,
         })
         for kind, content in (("venue-photo", self.venue_photo), ("organizer-proof", self.supporting)):
             endpoint = f"{self.path}/{application['id']}/evidence/{first_attempt['id']}/files/{kind}"
@@ -501,10 +521,210 @@ class ODWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.hod_decision(application, "APPROVE")).status_code, 409)
         self.assertEqual((await self.hod_decision(forwarded.json(), "APPROVE")).status_code, 200)
 
+    async def test_prior_without_signed_form_can_collect_evidence_but_cannot_advance_to_hod(self):
+        result = await self.post(files=[])
+        self.assertEqual(result.status_code, 201, result.text)
+        application = result.json()
+        self.assertEqual(application["documents"], [])
+        self.assertEqual(application["total_days"], 2)
+        self.assertEqual(application["tutor_name"], DEMO_TUTOR.full_name)
+        self.assertFalse(application["post_od_eligible"])
+        app_id = application["id"]
+        evidence_url = f"{self.path}/{app_id}/evidence"
+        monitor = f"/api/v1/hod/applications/{app_id}/prior"
+        approved = await self.client.get(monitor, headers=self.hod)
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.assertEqual(approved.json()["status"], "SUBMITTED")
+        self.assertNotIn("documents", approved.json())
+        self.assertNotIn("revision", approved.json())
+        self.assertEqual((await self.client.get(monitor, headers=self.other_hod)).status_code, 404)
+        self.assertEqual((await self.client.get(monitor, headers=self.admin)).status_code, 403)
+        self.assertEqual((await self.client.get(evidence_url, headers=self.hod)).status_code, 404)
+        for actor, expected in ((self.hod, [app_id]), (self.other_hod, [])):
+            rows = await self.client.get("/api/v1/hod/applications?view=prior", headers=actor)
+            self.assertEqual([row["id"] for row in rows.json()], expected)
+        self.assertEqual((await self.hod_decision(application, "APPROVE")).status_code, 404)
+        self.assertEqual((await self.hod_decision(application, "REJECT", remarks="Fictional reason")).status_code, 404)
+        self.assertEqual((await self.hod_decision(application, "APPROVE", headers=self.admin)).status_code, 403)
+        self.assertEqual((await self.decision(application, "PREAPPROVE", headers=self.admin)).status_code, 403)
+        self.assertEqual((await self.decision(application, "PREAPPROVE", headers=self.other_tutor)).status_code, 404)
+        self.assertEqual((await self.client.get(evidence_url, headers=self.student)).status_code, 409)
+
+        preapproved = await self.decision(application, "PREAPPROVE")
+        self.assertEqual(preapproved.status_code, 200)
+        self.assertTrue(preapproved.json()["post_od_eligible"])
+        days = (await self.client.get(evidence_url, headers=self.student)).json()["days"]
+        for index, day in enumerate(days):
+            capture = await self.map_capture(application, day, day["event_date"] + "T06:00:00+00:00")
+            self.assertEqual(capture.status_code, 200, capture.text)
+            attempt = self.attempt(await self.evidence(application, day), index)
+            checked = await self.review_day(application, day, attempt, "APPROVED")
+            self.assertEqual(checked.status_code, 200, checked.text)
+        self.assertEqual(checked.json()["status"], "UNDER_FINAL_VERIFICATION")
+        self.assertTrue(all(day["state"] == "VERIFIED" for day in checked.json()["days"]))
+        self.assertEqual((await self.client.get("/api/v1/hod/applications?view=pending", headers=self.hod)).json(), [])
+        detail = (await self.client.get(f"{self.path}/{app_id}", headers=self.student)).json()
+        self.assertEqual((await self.hod_decision(detail, "APPROVE")).status_code, 404)
+
+        # Even an existing row incorrectly queued for final review cannot bypass the signed form gate.
+        with self.factory.begin() as db:
+            db.get(ODApplication, UUID(app_id)).status = ApplicationStatus.UNDER_HOD_REVIEW
+        blocked = await self.hod_decision(detail, "APPROVE")
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertIn("signed OD form", blocked.json()["detail"])
+
+    async def test_single_day_prior_rejection_preserves_reason_and_post_od_stays_closed(self):
+        submission = await self.post(details=self.details | {"event_days": [self.details["event_days"][0]]}, files=[])
+        self.assertEqual(submission.status_code, 201)
+        application = submission.json()
+        self.assertEqual(application["total_days"], 1)
+        self.assertEqual(application["start_date"], application["end_date"])
+        refused = await self.decision(application, "REJECT", remarks=" ")
+        self.assertEqual(refused.status_code, 422)
+        rejected = await self.decision(application, "REJECT", remarks="Fictional schedule conflict.")
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+        self.assertFalse(rejected.json()["post_od_eligible"])
+        self.assertEqual(rejected.json()["history"][-1]["remarks"], "Fictional schedule conflict.")
+        evidence = f"{self.path}/{application['id']}/evidence"
+        self.assertEqual((await self.client.get(evidence, headers=self.student)).status_code, 409)
+
+    async def test_map_od_validates_scope_event_day_accuracy_retries_and_file_attachment(self):
+        result = await self.post(files=[])
+        self.assertEqual(result.status_code, 201, result.text)
+        app = result.json()
+        self.assertEqual(app["expected_venue"], {"latitude": 11.0, "longitude": 77.0})
+        with self.factory() as db:
+            days = [{"id": str(day.id), "date": day.event_date.isoformat()} for day in db.scalars(
+                sa.select(EventDay).where(EventDay.application_id == UUID(app["id"])).order_by(EventDay.event_date),
+            )]
+        first, second = days
+        boundary_start = "2026-11-19T18:30:00+00:00"
+        map_url = f"{self.path}/{app['id']}/map-od"
+        self.assertEqual((await self.map_capture(app, first, boundary_start)).status_code, 409)
+        self.assertEqual((await self.client.get(map_url, headers=self.student)).status_code, 409)
+        self.assertEqual((await self.post(details=self.details | {"expected_venue": None}, files=[])).status_code, 422)
+        self.assertEqual((await self.post(details=self.details | {
+            "expected_venue": {"latitude": 91, "longitude": 77},
+        }, files=[])).status_code, 422)
+        self.assertEqual((await self.decision(app, "PREAPPROVE")).status_code, 200)
+        self.assertEqual((await self.map_capture(app, first, boundary_start, headers=self.other_student)).status_code, 404)
+        self.assertEqual((await self.map_capture(app, first, boundary_start, headers=self.tutor)).status_code, 403)
+        self.assertEqual((await self.client.get(map_url, headers=self.hod)).status_code, 404)
+        self.assertEqual((await self.client.get(map_url, headers=self.other_tutor)).status_code, 404)
+        self.assertEqual((await self.client.get(map_url, headers=self.admin)).status_code, 403)
+        for when in ("2026-11-19T18:29:59.999999+00:00", "2026-11-20T18:30:00+00:00",
+                     "2026-11-22T06:00:00+00:00"):
+            denied = await self.map_capture(app, first, when, captured_at="2026-11-20T06:00:00Z")
+            self.assertEqual(denied.status_code, 409)
+        self.assertEqual((await self.map_capture(app, second, boundary_start)).status_code, 409)
+        self.assertEqual((await self.map_capture(app, {"id": uuid4()}, boundary_start)).status_code, 404)
+        for change in ({"latitude": 91}, {"longitude": -181}, {"latitude": True},
+                       {"accuracy_meters": 0}, {"accuracy_meters": -1}, {"latitude": "NaN"},
+                       {"distance_metres": 0}):
+            self.assertEqual((await self.map_capture(app, first, boundary_start, **change)).status_code, 422)
+        self.assertEqual((await self.evidence(app, first)).status_code, 409)
+
+        outside = await self.map_capture(app, first, boundary_start, latitude=11.01)
+        self.assertEqual(outside.status_code, 200, outside.text)
+        first_day = outside.json()["days"][0]
+        self.assertEqual(first_day["attempts"][0]["result"], "OUTSIDE_BOUNDARY")
+        self.assertFalse(outside.json()["days"][1]["attempts"])
+        self.assertEqual((await self.evidence(app, first)).status_code, 409)
+        request_id = str(uuid4())
+        exact = await self.map_capture(app, first, "2026-11-20T07:00:00+00:00",
+                                       accuracy_meters=100, request_id=request_id, captured_at=None)
+        self.assertEqual(exact.status_code, 200, exact.text)
+        capture_id = exact.json()["received_capture_id"]
+        self.assertEqual(exact.json()["days"][0]["selected_capture_id"], capture_id)
+        duplicate = await self.map_capture(app, first, "2026-11-20T07:01:00+00:00",
+                                           accuracy_meters=100, request_id=request_id, captured_at=None)
+        self.assertEqual(len(duplicate.json()["days"][0]["attempts"]), 2)
+        self.assertEqual(duplicate.json()["received_capture_id"], capture_id)
+        altered = await self.map_capture(app, first, "2026-11-20T07:02:00+00:00",
+                                         accuracy_meters=101, request_id=request_id, captured_at=None)
+        self.assertEqual(altered.status_code, 409)
+        with patch.object(settings, "MAP_OD_MAX_ACCURACY_METRES", 85):
+            poor = await self.map_capture(app, first, "2026-11-20T18:29:59.999999+00:00", accuracy_meters=90)
+        first_day = poor.json()["days"][0]
+        self.assertEqual(first_day["selected_capture_id"], capture_id)
+        self.assertEqual([item["result"] for item in first_day["attempts"]],
+                         ["OUTSIDE_BOUNDARY", "PASSED", "POOR_ACCURACY"])
+        self.assertEqual([item["allowed_accuracy_metres"] for item in first_day["attempts"]], [100, 100, 85])
+        self.assertIsNone(first_day["attempts"][1]["captured_at"])
+        both = await self.map_capture(app, second, "2026-11-22T06:00:00+00:00", latitude=11.01, accuracy_meters=101)
+        self.assertEqual(both.json()["days"][1]["attempts"][0]["result"], "OUTSIDE_AND_POOR_ACCURACY")
+        with self.factory() as db:
+            self.assertEqual(db.get(ODApplication, UUID(app["id"])).status, ApplicationStatus.PRE_APPROVED)
+            self.assertEqual(db.scalar(sa.select(sa.func.count()).select_from(StoredFile)), 0)
+        self.assertEqual((await self.evidence(app, second)).status_code, 409)
+        attached = await self.evidence(app, first)
+        self.assertEqual(attached.status_code, 201, attached.text)
+        self.assertEqual(attached.json()["days"][0]["attempts"][0]["gps"]["verification_result"], "PASSED")
+        monitor = await self.client.get(map_url, headers=self.tutor)
+        self.assertEqual(monitor.json()["days"][0]["attached_capture_id"], capture_id)
+        snapshot = (await self.client.get(f"{self.path}/{app['id']}", headers=self.student)).json()
+        correction = self.details | {"expected_revision": snapshot["revision"],
+                                     "expected_venue": {"latitude": 11.01, "longitude": 77}}
+        self.assertEqual((await self.post(details=correction, files=[], path=f"{self.path}/{app['id']}/resubmit")).status_code, 409)
+
+    async def test_map_od_legacy_capture_stays_unverified_and_sqlite_upgrade_retains_rows(self):
+        app, days = await self.preapproved_days()
+        attached = await self.evidence(app, days[0])
+        proof = self.attempt(attached)
+        self.assertIsNone(proof["gps"]["verification_result"])
+        map_url = f"{self.path}/{app['id']}/map-od"
+        self.assertIsNone((await self.client.get(map_url, headers=self.student)).json()["expected_venue"])
+        self.assertEqual((await self.map_capture(app, days[0], "2026-11-20T06:00:00+00:00")).status_code, 409)
+        upgrade_demo_map_od(self.factory.kw["bind"])
+        result = (await self.client.get(f"{self.path}/{app['id']}/evidence", headers=self.student)).json()
+        self.assertEqual(result["days"][0]["attempts"][0]["id"], proof["id"])
+        self.assertIsNone(result["days"][0]["attempts"][0]["gps"]["verification_result"])
+
+    async def test_map_od_final_hod_stage_and_correction_preserve_the_approved_pin(self):
+        details = self.details | {"event_days": [self.details["event_days"][0]]}
+        submitted = await self.post(details=details)
+        self.assertEqual(submitted.status_code, 201, submitted.text)
+        application = submitted.json()
+        self.assertEqual((await self.decision(application, "PREAPPROVE")).status_code, 200)
+        evidence_url = f"{self.path}/{application['id']}/evidence"
+        day, = (await self.client.get(evidence_url, headers=self.student)).json()["days"]
+        recorded = await self.map_capture(application, day, "2026-11-22T06:00:00+00:00")
+        self.assertEqual(recorded.status_code, 200, recorded.text)
+        self.assertEqual((await self.client.get(evidence_url, headers=self.student)).json()["status"], "PRE_APPROVED")
+        attempt = self.attempt(await self.evidence(application, day))
+        reviewed = await self.review_day(application, day, attempt, "APPROVED")
+        self.assertEqual(reviewed.json()["status"], "UNDER_HOD_REVIEW")
+        map_url = f"{self.path}/{application['id']}/map-od"
+        self.assertEqual((await self.client.get(map_url, headers=self.other_hod)).status_code, 404)
+        maps = await self.client.get(map_url, headers=self.hod)
+        self.assertEqual(maps.status_code, 200, maps.text)
+        self.assertEqual(maps.json()["days"][0]["attempts"][0]["result"], "PASSED")
+
+        url = f"{self.path}/{application['id']}"
+        pending = (await self.client.get(url, headers=self.hod)).json()
+        correction = await self.hod_decision(pending, "REQUEST_CORRECTION", remarks="Fictional clarification.")
+        self.assertEqual(correction.status_code, 200, correction.text)
+        revised = details | {"expected_revision": correction.json()["revision"]}
+        moved = await self.post(details=revised | {"expected_venue": {"latitude": 11.01, "longitude": 77}},
+                                path=url + "/resubmit", files=[])
+        self.assertEqual(moved.status_code, 422)
+        saved = await self.post(details=revised, path=url + "/resubmit", files=[])
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()["expected_venue"], application["expected_venue"])
+        forwarded = await self.decision(saved.json(), "PREAPPROVE")
+        self.assertEqual(forwarded.status_code, 200, forwarded.text)
+        finalized = await self.hod_decision(forwarded.json(), "APPROVE")
+        self.assertEqual(finalized.json()["status"], "OD_FINALIZED")
+
     async def test_evidence_requires_preapproval_both_files_and_valid_gps(self):
         application = await self.create()
-        state = (await self.client.get(f"{self.path}/{application['id']}/evidence", headers=self.student)).json()
-        first = state["days"][0]
+        evidence_url = f"{self.path}/{application['id']}/evidence"
+        self.assertEqual((await self.client.get(evidence_url, headers=self.student)).status_code, 409)
+        with self.factory() as db:
+            first_day_id = db.scalar(sa.select(EventDay.id).where(
+                EventDay.application_id == UUID(application["id"]),
+            ).order_by(EventDay.event_date).limit(1))
+        first = {"id": first_day_id}
         self.assertEqual((await self.evidence(application, first)).status_code, 409)
         self.assertEqual((await self.decision(application, "PREAPPROVE")).status_code, 200)
         self.assertEqual((await self.evidence(application, first, gps={})).status_code, 422)
@@ -549,6 +769,138 @@ class ODWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.review_day(application, first, attempt, "APPROVED", headers=self.student)).status_code, 403)
         self.assertEqual((await self.review_day(application, second, attempt, "APPROVED")).status_code, 404)
         self.assertEqual((await self.review_day(application, first, attempt, "APPROVED", remarks=" ")).status_code, 422)
+
+    async def test_faculty_dashboard_counts_enrollments_and_scopes_class_selection(self):
+        endpoint = "/api/v1/tutor/dashboard"
+        with self.factory.begin() as db:
+            template = db.get(Class, DEMO_STUDENT.class_id)
+            year = db.get(AcademicYear, template.academic_year_id)
+            past_year = AcademicYear(name="Fictional past year", start_date=year.start_date,
+                                     end_date=year.end_date, is_current=False)
+            db.add(past_year)
+            db.flush()
+            tutor_id = db.scalar(sa.select(TutorProfile.id).where(TutorProfile.user_id == self.tutor_id))
+
+            def create_class(name, *, assigned_to=tutor_id, active=True, assignment_active=True,
+                             year_id=year.id, department_id=template.department_id):
+                item = Class(name=name, department_id=department_id, academic_year_id=year_id,
+                             batch=template.batch, semester=template.semester, section="A", is_active=active)
+                db.add(item)
+                db.flush()
+                db.add(ClassTutorAssignment(class_id=item.id, academic_year_id=item.academic_year_id,
+                                            tutor_id=assigned_to, is_active=assignment_active))
+                return item.id
+
+            empty_id = create_class("Z Fictional empty class")
+            other_id = create_class("Other faculty class", assigned_to=self.other_tutor_profile)
+            inactive_id = create_class("Inactive class", active=False)
+            ended_id = create_class("Ended assignment", assignment_active=False)
+            past_id = create_class("Past academic year", year_id=past_year.id)
+            closed_department = Department(code="CLOSED", name="Fictional closed department", is_active=False)
+            db.add(closed_department)
+            db.flush()
+            closed_id = create_class("Closed department class", department_id=closed_department.id)
+
+            initial = db.scalar(sa.select(StudentProfile).where(StudentProfile.roll_number == DEMO_STUDENT.roll_number))
+            initial.gender = "MALE"
+            initial.accommodation = "COLLEGE_HOSTEL"
+            fixtures = [
+                ("FEMALE", "COLLEGE_HOSTEL", AccountStatus.ACTIVE, True),
+                (None, "COLLEGE_HOSTEL", AccountStatus.PENDING_ACTIVATION, True),
+                ("MALE", "OUTSIDE_STAYING", AccountStatus.DISABLED, True),
+                ("FEMALE", "OUTSIDE_STAYING", AccountStatus.ACTIVE, True),
+                ("FEMALE", "GUARDIAN", AccountStatus.ACTIVE, True),
+                ("MALE", "OTHER", AccountStatus.ACTIVE, True),
+                (None, None, AccountStatus.ACTIVE, True),
+                ("MALE", "GUARDIAN", AccountStatus.ACTIVE, False),
+            ]
+            for index, (gender, accommodation, status, enrolled) in enumerate(fixtures):
+                profile = StudentProfile(full_name="Fictional statistics student", roll_number=f"STAT-{index}",
+                                         register_number=f"STAT-REG-{index}", department_id=template.department_id,
+                                         gender=gender, accommodation=accommodation)
+                profile.enrollments.append(StudentClassEnrollment(
+                    class_id=template.id, academic_year_id=year.id, is_active=enrolled,
+                ))
+                db.add(User(email=f"stats-{index}@example.com", role=UserRole.STUDENT, account_status=status,
+                            student_profile=profile, hashed_password=self.password_hash if status == AccountStatus.ACTIVE else None))
+            db.flush()
+            with self.assertRaises(sa.exc.IntegrityError), db.begin_nested():
+                db.add(StudentClassEnrollment(student_id=initial.id, class_id=empty_id, academic_year_id=year.id))
+                db.flush()
+
+        response = await self.client.get(endpoint, headers=self.tutor)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        data = response.json()
+        self.assertEqual([item["id"] for item in data["classes"]], [str(DEMO_STUDENT.class_id), str(empty_id)])
+        self.assertEqual(set(data["classes"][0]), {"id", "name", "department", "academic_year"})
+        self.assertEqual(data["selected_class_id"], str(DEMO_STUDENT.class_id))
+        self.assertEqual(data["statistics"], {
+            "total_students": {"total": 8, "boys": 3, "girls": 3},
+            "hostel_students": {"total": 3, "boys": 1, "girls": 1},
+            "outside_staying": {"total": 2, "boys": 1, "girls": 1},
+            "guardian": {"total": 1, "boys": 0, "girls": 1},
+        })
+
+        empty = await self.client.get(endpoint, headers=self.tutor, params={"class_id": str(empty_id)})
+        self.assertEqual(empty.status_code, 200)
+        self.assertEqual(empty.json()["selected_class_id"], str(empty_id))
+        self.assertTrue(all(counts == {"total": 0, "boys": 0, "girls": 0}
+                            for counts in empty.json()["statistics"].values()))
+        for class_id in (other_id, inactive_id, ended_id, past_id, closed_id, uuid4()):
+            with self.subTest(class_id=class_id):
+                denied = await self.client.get(endpoint, headers=self.tutor, params={"class_id": str(class_id)})
+                self.assertEqual(denied.status_code, 404)
+        invalid = await self.client.get(endpoint, headers=self.tutor, params={"class_id": "invalid"})
+        self.assertEqual(invalid.status_code, 422)
+        for headers in (self.student, self.hod, self.admin):
+            self.assertEqual((await self.client.get(endpoint, headers=headers)).status_code, 403)
+        self.assertEqual((await self.client.get(endpoint)).status_code, 401)
+        with self.factory.begin() as db:
+            db.query(ClassTutorAssignment).filter_by(tutor_id=self.other_tutor_profile).update({"is_active": False})
+        unassigned = await self.client.get(endpoint, headers=self.other_tutor)
+        self.assertEqual(unassigned.json(), {"classes": [], "selected_class_id": None, "statistics": None})
+
+    async def test_admin_monitoring_keeps_history_private_files_and_decisions_scoped(self):
+        application = await self.create()
+        preapproved = await self.decision(application, "PREAPPROVE")
+        self.assertEqual(preapproved.status_code, 200)
+        base = "/api/v1/admin"
+        app_id = application["id"]
+        path = f"{base}/applications/{app_id}"
+        with patch.multiple(settings, ENVIRONMENT="local-demo", LOCAL_DEMO_DIR=self.directory, CORS_ORIGINS=[DEMO_ORIGIN]):
+            self.assertEqual((await self.client.get(path, headers=self.student)).status_code, 403)
+            listing = await self.client.get(base + "/applications", headers=self.admin)
+            self.assertEqual(listing.json()[0]["id"], app_id)
+            metrics = (await self.client.get(base + "/metrics", headers=self.admin)).json()
+            self.assertEqual(metrics["applications"]["PRE_APPROVED"], 1)
+            self.assertEqual((await self.decision(application, "REJECT", headers=self.admin)).status_code, 403)
+            hod_path = f"/api/v1/hod/applications/{app_id}/decision"
+            for action in ("APPROVE", "REJECT"):
+                denied = await self.client.post(hod_path, headers=self.admin, json={
+                    "action": action, "expected_revision": application["revision"], "remarks": "Fictional remarks",
+                })
+                self.assertEqual(denied.status_code, 403)
+            private = application["documents"][0]["id"]
+            for suffix in (f"/documents/{private}", "/evidence"):
+                self.assertEqual((await self.client.get(f"{self.path}/{app_id}{suffix}",
+                                                        headers=self.admin)).status_code, 403)
+            blocked = await self.client.post(f"{base}/users/{self.tutor_id}/deactivate", headers=self.admin)
+            self.assertEqual(blocked.status_code, 409)
+            with self.factory() as db:
+                student_id = db.scalar(sa.select(User.id).where(User.email == DEMO_STUDENT.email))
+            deactivated = await self.client.post(f"{base}/users/{student_id}/deactivate", headers=self.admin)
+            self.assertEqual(deactivated.status_code, 204)
+            result = await self.client.get(path, headers=self.admin)
+            self.assertEqual(result.status_code, 200, result.text)
+            details = result.json()
+            self.assertEqual(details["status"], "PRE_APPROVED")
+            self.assertTrue(details["department_name"])
+            self.assertTrue(details["current_hod_name"])
+            self.assertEqual(details["history"][-1]["to_status"], "PRE_APPROVED")
+            self.assertNotIn("documents", details)
+            original = await self.client.get(f"{self.path}/{app_id}/documents/{private}", headers=self.tutor)
+            self.assertEqual(original.status_code, 200)
 
     async def test_demo_academic_mappings_require_admin_and_apply_to_future_applications(self):
         existing = await self.create()

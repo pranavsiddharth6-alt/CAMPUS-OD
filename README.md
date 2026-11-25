@@ -61,6 +61,8 @@ CAMPUS OD/
 
 For the isolated SQLite demo, see the setup and browser walkthrough. For role permissions, the approval workflow, API routes and migration details, see the HOD implementation guide. [Local demo](docs/LOCAL_DEMO.md) · [HOD approval](docs/HOD_APPROVAL.md)
 
+Campus OD 3.0 Phase 1 adds manual college data management, student demographics, Admin statistics, and read-only OD monitoring in the local demo. [Phase 1 implementation and migration notes](docs/PROJECT_STATUS.md#campus-od-30-phase-1)
+
 ### Prerequisites
 - Node.js (v18+) and npm
 - Python (v3.11+ / v3.13)
@@ -106,4 +108,4 @@ The backend API documentation will be available at:
 
 ## Current status
 
-The localhost SQLite demo supports all four roles. Tutors verify each event day's evidence before the application goes to the department HOD. HOD approval finalizes the OD. Revision `0004_hod_approval` is prepared for PostgreSQL and awaits approval for live Supabase deployment. [Workflow and migration details](docs/HOD_APPROVAL.md)
+The localhost SQLite demo supports all four roles. Tutor approval of Prior OD opens event-day location capture in Map OD, followed by participation evidence. Applications with a signed form on file can proceed to final HOD review after tutor verification. The explicit Post OD screen and signed-form upload await Phase 5. The repository migration head is `0006_map_od`. [Map OD and migration details](docs/PROJECT_STATUS.md#campus-od-30-phase-4)

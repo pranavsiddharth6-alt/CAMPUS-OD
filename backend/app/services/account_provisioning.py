@@ -16,7 +16,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import settings
 from app.models.academic import AcademicYear, Class, Department, HODAssignment, StudentClassEnrollment
 from app.models.enums import AccountActionPurpose, AccountStatus, UserRole
-from app.models.user import AccountActionToken, StudentProfile, TutorProfile, User
+from app.models.user import AccountActionToken, AdminProfile, StudentProfile, TutorProfile, User
+from app.models.admin_audit import record_admin_change
 from app.schemas.provisioning import (
     ApprovedHODRecord,
     ApprovedStudentRecord,
@@ -33,6 +34,7 @@ _IDENTITY_UNIQUE_INDEXES = {
     "ix_student_profiles_roll_number",
     "ix_student_profiles_register_number",
     "ix_tutor_profiles_staff_id",
+    "ix_admin_profiles_staff_id",
 }
 _SQLITE_IDENTITY_CONFLICTS = {
     "UNIQUE constraint failed: users.email",
@@ -41,6 +43,7 @@ _SQLITE_IDENTITY_CONFLICTS = {
     "UNIQUE constraint failed: student_profiles.roll_number",
     "UNIQUE constraint failed: student_profiles.register_number",
     "UNIQUE constraint failed: tutor_profiles.staff_id",
+    "UNIQUE constraint failed: admin_profiles.staff_id",
 }
 
 
@@ -124,7 +127,7 @@ class AccountProvisioningService:
             raise ProvisioningStoreError() from None
 
     def provision_student(
-        self, request: StudentProvisioningRequest, *, approved: ApprovedStudentRecord,
+        self, request: StudentProvisioningRequest, *, approved: ApprovedStudentRecord, actor_id: UUID | None = None,
     ) -> ProvisionedAccount:
         if not isinstance(approved, ApprovedStudentRecord) or (
             request.model_dump() != approved.model_dump(exclude={"academic_year_id"})
@@ -137,8 +140,9 @@ class AccountProvisioningService:
                 .join(AcademicYear, AcademicYear.id == Class.academic_year_id)
                 .join(Department, Department.id == Class.department_id)
                 .where(Class.id == request.class_id, Class.department_id == request.department_id,
-                       AcademicYear.id == approved.academic_year_id)
-                .with_for_update(read=True, of=Class)
+                       AcademicYear.id == approved.academic_year_id, Class.is_active.is_(True),
+                       Department.is_active.is_(True))
+                .with_for_update(read=True, of=(Class, Department))
             )
             if academic_year_id is None:
                 raise ProvisioningValidationError("The student's approved class, department and year do not match.")
@@ -146,6 +150,7 @@ class AccountProvisioningService:
             profile = StudentProfile(
                 full_name=request.full_name, department_id=request.department_id,
                 roll_number=request.roll_number, register_number=request.register_number,
+                gender=request.gender, accommodation=request.accommodation,
             )
             profile.enrollments.append(StudentClassEnrollment(
                 class_id=request.class_id, academic_year_id=academic_year_id, is_active=True,
@@ -153,19 +158,23 @@ class AccountProvisioningService:
             user = User(email=request.email, role=UserRole.STUDENT, student_profile=profile,
                         account_status=AccountStatus.PENDING_ACTIVATION, auth_version=0)
             account, invitation = self._stage_invitation(db, user, profile)
+            if actor_id:
+                record_admin_change(db, actor_id, "student", account.user_id, "create",
+                                    class_id=str(request.class_id))
 
         self._handoff(account, invitation)
         return account
 
     def provision_tutor(
-        self, request: TutorProvisioningRequest, *, approved: ApprovedTutorRecord,
+        self, request: TutorProvisioningRequest, *, approved: ApprovedTutorRecord, actor_id: UUID | None = None,
     ) -> ProvisionedAccount:
         if not isinstance(approved, ApprovedTutorRecord) or request.model_dump() != approved.model_dump():
             raise ProvisioningValidationError("Tutor details do not match the approved staff record.")
 
         with self._transaction() as db:
             department_id = db.scalar(
-                select(Department.id).where(Department.id == request.department_id).with_for_update(read=True)
+                select(Department.id).where(Department.id == request.department_id,
+                                            Department.is_active.is_(True)).with_for_update(read=True)
             )
             if department_id is None:
                 raise ProvisioningValidationError("The tutor's approved department does not exist.")
@@ -177,6 +186,9 @@ class AccountProvisioningService:
             user = User(email=request.email, role=UserRole.TUTOR, tutor_profile=profile,
                         account_status=AccountStatus.PENDING_ACTIVATION, auth_version=0)
             account, invitation = self._stage_invitation(db, user, profile)
+            if actor_id:
+                record_admin_change(db, actor_id, "faculty", account.user_id, "create",
+                                    department_id=str(department_id))
 
         self._handoff(account, invitation)
         return account
@@ -192,9 +204,10 @@ class AccountProvisioningService:
             ).with_for_update(read=True))
             if administrator is None:
                 raise ProvisioningValidationError("An active administrator is required to provision a HOD.")
-            if db.get(Department, request.department_id) is None:
+            if db.scalar(select(Department.id).where(Department.id == request.department_id,
+                                                       Department.is_active.is_(True)).with_for_update(read=True)) is None:
                 raise ProvisioningValidationError("The approved department does not exist.")
-            user = User(email=request.email, role=UserRole.HOD,
+            user = User(email=request.email, role=UserRole.HOD, hod_display_name=request.full_name,
                         account_status=AccountStatus.PENDING_ACTIVATION, auth_version=0)
             db.add(user)
             db.flush()
@@ -202,12 +215,29 @@ class AccountProvisioningService:
                                        full_name=request.full_name, assigned_by_user_id=administrator_id)
             db.add(assignment)
             account, invitation = self._stage_invitation(db, user, assignment)
+            record_admin_change(db, administrator_id, "hod", account.user_id, "create",
+                                department_id=str(request.department_id))
 
         self._handoff(account, invitation)
         return account
 
+    def provision_admin(self, request, *, actor_id: UUID) -> ProvisionedAccount:
+        with self._transaction() as db:
+            actor = db.scalar(select(User.id).where(User.id == actor_id, User.role == UserRole.ADMIN,
+                                                    User.account_status == AccountStatus.ACTIVE).with_for_update(read=True))
+            if actor is None:
+                raise ProvisioningValidationError("An active administrator is required.")
+            profile = AdminProfile(full_name=request.full_name, staff_id=request.staff_id,
+                                   designation=request.designation)
+            user = User(email=request.email, role=UserRole.ADMIN, admin_profile=profile,
+                        account_status=AccountStatus.PENDING_ACTIVATION, auth_version=0)
+            account, invitation = self._stage_invitation(db, user, profile)
+            record_admin_change(db, actor_id, "admin", account.user_id, "create")
+        self._handoff(account, invitation)
+        return account
+
     def _stage_invitation(
-        self, db: Session, user: User, profile: StudentProfile | TutorProfile | HODAssignment,
+        self, db: Session, user: User, profile: StudentProfile | TutorProfile | HODAssignment | AdminProfile,
     ) -> tuple[ProvisionedAccount, ActivationInvitation]:
         now = datetime.now(timezone.utc)
         token = token_urlsafe(32)

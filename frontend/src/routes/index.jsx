@@ -13,14 +13,19 @@ import { useSession } from '../services/useSession';
 import { StudentDashboardPage } from '../pages/student/StudentDashboardPage';
 import { StudentApplicationsPage } from '../pages/student/StudentApplicationsPage';
 import { NewApplicationPage } from '../pages/student/NewApplicationPage';
+import { PostODPage } from '../pages/student/PostODPage';
+import { MapODPage } from '../pages/student/MapODPage';
 
 import { TutorDashboardPage } from '../pages/tutor/TutorDashboardPage';
 import { TutorApplicationsPage } from '../pages/tutor/TutorApplicationsPage';
+import { TutorReportsPage } from '../pages/tutor/TutorReportsPage';
 
 import { HODApplicationsPage, HODDashboardPage } from '../pages/hod/HODApplicationsPage';
 import { AdminDashboardPage } from '../pages/admin/AdminDashboardPage';
 import { AdminUsersPage } from '../pages/admin/AdminUsersPage';
 import { AcademicAssignmentsPage } from '../pages/admin/AcademicAssignmentsPage';
+import { AdminCatalogPage } from '../pages/admin/AdminCatalogPage';
+import { AdminApplicationsPage } from '../pages/admin/AdminApplicationsPage';
 
 function ProtectedPortal({ role }) {
   const { state, user } = useSession();
@@ -63,6 +68,8 @@ export function AppRoutes() {
         <Route path="applications/new" element={<NewApplicationPage />} />
         <Route path="applications/:applicationId" element={<ApplicationDetailPage />} />
         <Route path="applications/:applicationId/correct" element={<NewApplicationPage />} />
+        <Route path="post-od" element={<PostODPage />} />
+        <Route path="post-od/:applicationId/map" element={<MapODPage />} />
       </Route>
 
       {/* Tutor Portal Routes */}
@@ -70,6 +77,7 @@ export function AppRoutes() {
         <Route index element={<Navigate to="/tutor/dashboard" replace />} />
         <Route path="dashboard" element={<TutorDashboardPage />} />
         <Route path="applications" element={<TutorApplicationsPage />} />
+        <Route path="reports" element={<TutorReportsPage />} />
         <Route path="applications/:applicationId" element={<ApplicationDetailPage tutor />} />
       </Route>
 
@@ -79,6 +87,8 @@ export function AppRoutes() {
         <Route path="applications" element={<HODApplicationsPage />} />
         <Route path="history" element={<HODApplicationsPage history />} />
         <Route path="applications/:applicationId" element={<ApplicationDetailPage hod />} />
+        <Route path="prior-od" element={<HODApplicationsPage prior />} />
+        <Route path="prior-od/:applicationId" element={<ApplicationDetailPage hod priorMonitor />} />
       </Route>
 
       {/* Admin Portal Routes */}
@@ -87,6 +97,9 @@ export function AppRoutes() {
         <Route path="dashboard" element={<AdminDashboardPage />} />
         <Route path="users" element={<AdminUsersPage />} />
         <Route path="academics" element={<AcademicAssignmentsPage />} />
+        <Route path="catalog" element={<AdminCatalogPage />} />
+        <Route path="applications" element={<AdminApplicationsPage />} />
+        <Route path="applications/:applicationId" element={<ApplicationDetailPage admin />} />
       </Route>
 
       {/* Fallback route */}

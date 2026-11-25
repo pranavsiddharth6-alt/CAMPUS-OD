@@ -17,6 +17,7 @@ from app.database.session import get_session_factory
 from app.dependencies.auth import AuthenticatedUser, require_roles
 from app.models.academic import Class, ClassTutorAssignment, Department, HODAssignment, StudentClassEnrollment
 from app.models.enums import AccountStatus, UserRole
+from app.models.admin_audit import record_admin_change
 from app.models.user import AuthSession, TutorProfile, User
 from app.services.auth_sessions import AuthSessionService
 
@@ -29,6 +30,9 @@ router = APIRouter(
 class TutorMapping(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
     tutor_id: UUID | None
+
+
+Admin = Annotated[AuthenticatedUser, Depends(require_roles(UserRole.ADMIN))]
 
 
 @router.get("")
@@ -63,7 +67,7 @@ def academics(response: Response):
         raise HTTPException(503, "Academic records are temporarily unavailable.", headers=_NO_STORE) from None
 
 
-def _set_mapping(class_id: UUID, payload: TutorMapping) -> None:
+def _set_mapping(class_id: UUID, payload: TutorMapping, actor_id: UUID) -> None:
     try:
         with get_session_factory().begin() as db:
             item = db.scalar(select(Class).where(Class.id == class_id).with_for_update())
@@ -72,10 +76,18 @@ def _set_mapping(class_id: UUID, payload: TutorMapping) -> None:
             existing = db.scalar(select(ClassTutorAssignment).where(
                 ClassTutorAssignment.class_id == item.id, ClassTutorAssignment.academic_year_id == item.academic_year_id,
             ).with_for_update())
+            previous = existing.tutor_id if existing and existing.is_active else None
+            if previous == payload.tutor_id:
+                return
+            record_admin_change(db, actor_id, "tutor_assignment", class_id, "update",
+                                previous_tutor_id=str(previous) if previous else None,
+                                tutor_id=str(payload.tutor_id) if payload.tutor_id else None)
             if payload.tutor_id is None:
                 if existing is not None:
                     existing.is_active = False
                 return
+            if not item.is_active or not item.department.is_active:
+                raise HTTPException(409, "Choose an active class and department.", headers=_NO_STORE)
             tutor = db.scalar(select(TutorProfile.id).join(TutorProfile.user).where(
                 TutorProfile.id == payload.tutor_id, TutorProfile.department_id == item.department_id,
                 User.role == UserRole.TUTOR, User.account_status == AccountStatus.ACTIVE,
@@ -94,15 +106,12 @@ def _set_mapping(class_id: UUID, payload: TutorMapping) -> None:
 
 
 @router.put("/classes/{class_id}/tutor", status_code=204, dependencies=_COOKIE_AUTH_GUARDS)
-async def set_mapping(class_id: UUID, request: Request) -> Response:
+async def set_mapping(class_id: UUID, request: Request, admin: Admin) -> Response:
     payload = await read_auth_json(request, TutorMapping)
     if payload is None:
         raise HTTPException(422, "Choose a tutor or explicitly clear the mapping.", headers=_NO_STORE)
-    await run_in_threadpool(_set_mapping, class_id, payload)
+    await run_in_threadpool(_set_mapping, class_id, payload, admin.user_id)
     return Response(status_code=204, headers=_NO_STORE)
-
-
-Admin = Annotated[AuthenticatedUser, Depends(require_roles(UserRole.ADMIN))]
 
 
 class HODMapping(BaseModel):
@@ -118,13 +127,13 @@ def hod_assignments(response: Response):
     try:
         with get_session_factory()() as db:
             departments = db.scalars(select(Department).order_by(Department.name)).all()
-            rows = db.execute(select(HODAssignment, User.email, User.role, User.account_status)
+            rows = db.execute(select(HODAssignment, User.email, User.role, User.account_status, User.hod_display_name)
                               .join(User, User.id == HODAssignment.user_id)
                               .order_by(HODAssignment.assigned_at.desc(), HODAssignment.id)).all()
             history = {department.id: [] for department in departments}
             available = {}
             assigned_users = set()
-            for mapping, email, role, status in rows:
+            for mapping, email, role, status, display_name in rows:
                 history[mapping.department_id].append({
                     "id": mapping.id, "user_id": mapping.user_id, "name": mapping.full_name,
                     "email": email, "account_status": status, "assigned_at": mapping.assigned_at,
@@ -133,7 +142,7 @@ def hod_assignments(response: Response):
                 if mapping.ended_at is None:
                     assigned_users.add(mapping.user_id)
                 if role == UserRole.HOD and status == AccountStatus.ACTIVE:
-                    available.setdefault(mapping.user_id, {"id": mapping.user_id, "name": mapping.full_name})
+                    available.setdefault(mapping.user_id, {"id": mapping.user_id, "name": display_name or mapping.full_name})
             return {
                 "departments": [{"id": item.id, "name": item.name, "history": history[item.id]}
                                 for item in departments],
@@ -146,7 +155,7 @@ def hod_assignments(response: Response):
 def _set_hod_mapping(department_id: UUID, payload: HODMapping, actor_id: UUID) -> None:
     try:
         with get_session_factory().begin() as db:
-            department = db.scalar(select(Department.id).where(Department.id == department_id).with_for_update())
+            department = db.get(Department, department_id, with_for_update=True)
             if department is None:
                 raise HTTPException(404, "Department not found.", headers=_NO_STORE)
             current = db.scalar(select(HODAssignment).where(
@@ -162,13 +171,18 @@ def _set_hod_mapping(department_id: UUID, payload: HODMapping, actor_id: UUID) -
             )}
             name = None
             if payload.user_id:
+                if not department.is_active:
+                    raise HTTPException(409, "Choose an active department.", headers=_NO_STORE)
                 incoming = users.get(payload.user_id)
                 previous = db.scalars(select(HODAssignment).where(HODAssignment.user_id == payload.user_id)
                                       .order_by(HODAssignment.assigned_at.desc(), HODAssignment.id).limit(1)).first()
                 if (incoming is None or incoming.role != UserRole.HOD or incoming.account_status != AccountStatus.ACTIVE
                         or previous is None or previous.ended_at is None):
                     raise HTTPException(409, "Choose an active HOD account without an assignment.", headers=_NO_STORE)
-                name = previous.full_name
+                name = incoming.hod_display_name or previous.full_name
+            record_admin_change(db, actor_id, "hod_assignment", department_id, "update",
+                                previous_user_id=str(current.user_id) if current else None,
+                                user_id=str(payload.user_id) if payload.user_id else None)
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             if current:
                 current.ended_at, current.ended_by_user_id = max(now, current.assigned_at), actor_id

@@ -10,7 +10,7 @@ const statuses = {
   SUBMITTED: ['Submitted', 'primary'],
   UNDER_TUTOR_REVIEW: ['Under tutor review', 'warning'],
   CORRECTION_REQUESTED: ['Correction requested', 'warning'],
-  PRE_APPROVED: ['Preapproved', 'success'],
+  PRE_APPROVED: ['Prior OD approved', 'success'],
   AWAITING_PARTICIPATION_PROOF: ['Awaiting participation evidence', 'warning'],
   UNDER_FINAL_VERIFICATION: ['Tutor evidence verification', 'primary'],
   UNDER_HOD_REVIEW: ['Awaiting HOD review', 'primary'],

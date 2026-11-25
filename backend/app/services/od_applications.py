@@ -10,13 +10,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload, sessionmaker
 
 from app.dependencies.auth import AuthenticatedUser
-from app.models.academic import AcademicYear, Class, ClassTutorAssignment, HODAssignment, StudentClassEnrollment
+from app.models.academic import AcademicYear, Class, ClassTutorAssignment, Department, HODAssignment, StudentClassEnrollment
 from app.models.application import ApplicationStatusHistory, EventDay, ODApplication
 from app.models.enums import AccountStatus, ApplicationStatus, DaySession, DocumentType, UserRole
 from app.models.evidence import ApplicationDocument, StoredFile
 from app.models.user import AuthSession, StudentProfile, TutorProfile, User
 from app.schemas.application import (
-    ApplicationCorrection, ApplicationDetail, ApplicationDocumentResponse, ApplicationSubmission,
+    ApplicationCorrection, ApplicationDetail, ApplicationDocumentResponse, ApplicationOverview, ApplicationSubmission, Coordinates,
     ApplicationSummary, SubmissionDay, TutorDecision,
 )
 from app.services.storage import LocalStorageService
@@ -30,6 +30,12 @@ _DECISIONS = {
     "PREAPPROVE": ApplicationStatus.PRE_APPROVED,
     "REJECT": ApplicationStatus.REJECTED,
     "REQUEST_CORRECTION": ApplicationStatus.CORRECTION_REQUESTED,
+}
+PARTICIPATION_OPEN_STATUSES = {
+    ApplicationStatus.PRE_APPROVED,
+    ApplicationStatus.AWAITING_PARTICIPATION_PROOF,
+    ApplicationStatus.UNDER_FINAL_VERIFICATION,
+    ApplicationStatus.UNDER_TUTOR_CORRECTION_REVIEW,
 }
 
 
@@ -64,6 +70,9 @@ def _update_event(db: Session, app: ODApplication, submission: ApplicationSubmis
     app.host_institution = submission.host_institution
     app.venue_location = submission.venue_location
     app.description = submission.description
+    if submission.expected_venue is not None:
+        app.expected_venue_latitude = submission.expected_venue.latitude
+        app.expected_venue_longitude = submission.expected_venue.longitude
     dates = {day.event_date: day.session for day in submission.event_days}
     app.start_date, app.end_date, app.total_days = min(dates), max(dates), len(dates)
     obsolete = [day.id for day in app.event_days if day.event_date not in dates]
@@ -89,20 +98,40 @@ def _summary(app: ODApplication) -> ApplicationSummary:
         student_roll_number=app.student.roll_number, tutor_name=app.assigned_tutor.full_name,
         event_name=app.event_name, event_category=app.event_category, venue_location=app.venue_location,
         start_date=app.start_date, end_date=app.end_date, total_days=app.total_days, status=app.status,
+        post_od_eligible=(app.status in PARTICIPATION_OPEN_STATUSES
+                          or app.status == ApplicationStatus.HOD_CORRECTION_REQUESTED),
     )
 
 
-def _detail(app: ODApplication) -> ApplicationDetail:
-    history = _history(app)
-    return ApplicationDetail(
+def _overview(app: ODApplication) -> ApplicationOverview:
+    return ApplicationOverview(
         **_summary(app).model_dump(), host_institution=app.host_institution, description=app.description,
         event_days=[SubmissionDay(event_date=day.event_date, session=day.session)
                     for day in sorted(app.event_days, key=lambda day: day.event_date)],
+        history=_history(app),
+    )
+
+
+def _detail(app: ODApplication, *, include_documents: bool = True) -> ApplicationDetail:
+    overview = _overview(app)
+    return ApplicationDetail(
+        **overview.model_dump(),
+        expected_venue=expected_venue(app) if include_documents else None,
         documents=[ApplicationDocumentResponse(id=doc.id, document_type=doc.document_type,
                                                filename=doc.stored_file.original_filename)
-                   for doc in sorted(app.documents, key=lambda doc: (doc.uploaded_at, doc.id))],
-        history=history, revision=history[-1].id if history else None,
+                   for doc in sorted(app.documents, key=lambda doc: (doc.uploaded_at, doc.id))] if include_documents else [],
+        revision=overview.history[-1].id if overview.history else None,
     )
+
+
+def has_signed_form(app: ODApplication) -> bool:
+    return any(document.document_type == DocumentType.ORIGINAL_SIGNED_OD_FORM for document in app.documents)
+
+
+def expected_venue(app: ODApplication) -> Coordinates | None:
+    if app.expected_venue_latitude is None or app.expected_venue_longitude is None:
+        return None
+    return Coordinates(latitude=app.expected_venue_latitude, longitude=app.expected_venue_longitude)
 
 
 def _active_hod_assignment(user: AuthenticatedUser):
@@ -133,13 +162,17 @@ def _scope(user: AuthenticatedUser, *, hod_review_only: bool = True):
     raise ApplicationError(403, "Insufficient permissions.")
 
 
-def _load(db: Session, application_id: UUID, user: AuthenticatedUser, *, lock: bool = False) -> ODApplication:
-    query = select(ODApplication).where(ODApplication.id == application_id, _scope(user)).options(
+def _load(db: Session, application_id: UUID, user: AuthenticatedUser, *, lock: bool = False,
+          prior_monitor: bool = False) -> ODApplication:
+    query = select(ODApplication).where(
+        ODApplication.id == application_id, _scope(user, hod_review_only=not prior_monitor),
+    ).options(
         selectinload(ODApplication.student), selectinload(ODApplication.assigned_tutor),
         selectinload(ODApplication.event_days),
         selectinload(ODApplication.status_history).joinedload(ApplicationStatusHistory.hod_assignment),
-        selectinload(ODApplication.documents).joinedload(ApplicationDocument.stored_file),
     )
+    if not prior_monitor:
+        query = query.options(selectinload(ODApplication.documents).joinedload(ApplicationDocument.stored_file))
     app = db.scalar(query.with_for_update() if lock else query)
     if app is None:
         raise ApplicationError(404, "Application not found.")
@@ -163,9 +196,11 @@ def _resolve_assignment(db: Session, user: AuthenticatedUser) -> tuple[StudentPr
         .join(Class, (Class.id == StudentClassEnrollment.class_id)
               & (Class.academic_year_id == StudentClassEnrollment.academic_year_id))
         .join(AcademicYear, AcademicYear.id == Class.academic_year_id)
+        .join(Department, Department.id == Class.department_id)
         .where(StudentClassEnrollment.student_id == student.id, StudentClassEnrollment.is_active.is_(True),
-               AcademicYear.is_current.is_(True), Class.department_id == student.department_id)
-        .limit(2).with_for_update(read=True, of=(StudentClassEnrollment, Class, AcademicYear))
+               AcademicYear.is_current.is_(True), Class.department_id == student.department_id,
+               Class.is_active.is_(True), Department.is_active.is_(True))
+        .limit(2).with_for_update(read=True, of=(StudentClassEnrollment, Class, AcademicYear, Department))
     ).all()
     if len(enrollments) != 1:
         raise ApplicationError(409, "Exactly one active current-year enrollment is required.")
@@ -198,8 +233,8 @@ class ODApplicationService:
     def submit(self, user: AuthenticatedUser, submission: ApplicationSubmission, files: list[ODFile]) -> ApplicationDetail:
         if user.role != UserRole.STUDENT:
             raise ApplicationError(403, "Insufficient permissions.")
-        if sum(item.kind == DocumentType.ORIGINAL_SIGNED_OD_FORM for item in files) != 1:
-            raise ApplicationError(422, "One original signed OD form is required.")
+        if sum(item.kind == DocumentType.ORIGINAL_SIGNED_OD_FORM for item in files) > 1:
+            raise ApplicationError(422, "Only one original signed OD form can be attached.")
         with write_with_uploads(self._sessions, self._storage) as (db, keys):
             student, tutor = _resolve_assignment(db, user)
             app = ODApplication(application_number=f"OD-{uuid4().hex.upper()}", student=student,
@@ -212,9 +247,11 @@ class ODApplicationService:
             return _detail(app)
 
     def list_applications(
-        self, user: AuthenticatedUser, *, view: Literal["pending", "history"] | None = None,
+        self, user: AuthenticatedUser, *, view: Literal["pending", "history", "prior"] | None = None,
     ) -> list[ApplicationSummary]:
-        query = select(ODApplication).where(_scope(user))
+        if view == "prior" and user.role != UserRole.HOD:
+            raise ApplicationError(403, "Insufficient permissions.")
+        query = select(ODApplication).where(_scope(user, hod_review_only=view != "prior"))
         if view == "pending":
             query = query.where(ODApplication.status == ApplicationStatus.UNDER_HOD_REVIEW)
         elif view == "history":
@@ -248,6 +285,12 @@ class ODApplicationService:
         with self._sessions() as db:
             return _detail(_load(db, application_id, user))
 
+    def monitor_prior(self, user: AuthenticatedUser, application_id: UUID) -> ApplicationOverview:
+        if user.role != UserRole.HOD:
+            raise ApplicationError(403, "Insufficient permissions.")
+        with self._sessions() as db:
+            return _overview(_load(db, application_id, user, prior_monitor=True))
+
     def resubmit(
         self, user: AuthenticatedUser, application_id: UUID, correction: ApplicationCorrection, files: list[ODFile],
     ) -> ApplicationDetail:
@@ -264,7 +307,9 @@ class ODApplicationService:
             if is_hod_correction:
                 # Existing evidence is tied to this event, venue and schedule.
                 fixed_fields = ("event_name", "event_category", "host_institution", "venue_location")
-                if any(getattr(correction, name) != getattr(app, name) for name in fixed_fields) or (
+                if (correction.expected_venue is not None and correction.expected_venue != expected_venue(app)) or any(
+                    getattr(correction, name) != getattr(app, name) for name in fixed_fields
+                ) or (
                     {day.event_date: day.session for day in correction.event_days}
                     != {day.event_date: day.session for day in app.event_days}
                 ):
@@ -292,6 +337,8 @@ class ODApplicationService:
                     from app.services.od_evidence import all_days_verified
                     if not all_days_verified(app):
                         raise ApplicationError(409, "Verify all required evidence before forwarding to the HOD.")
+                    if not has_signed_form(app):
+                        raise ApplicationError(409, "The signed OD form is required before forwarding to the HOD.")
                     target = ApplicationStatus.UNDER_HOD_REVIEW
                 elif decision.action == "REQUEST_CORRECTION":
                     target = ApplicationStatus.HOD_CORRECTION_REQUESTED

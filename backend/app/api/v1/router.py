@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from app.api.v1.admin_academics import router as admin_academics_router
 from app.api.v1.admin_provisioning import admin_provisioning_router
+from app.api.v1.admin_records import router as admin_records_router
 from app.api.v1.auth import auth_router
+from app.api.v1.faculty_dashboard import router as faculty_dashboard_router
 from app.api.v1.od_applications import od_router
 from app.database.session import check_db_connection
 from app.schemas.health import DatabaseHealthResponse
@@ -10,7 +12,9 @@ api_router = APIRouter()
 api_router.include_router(auth_router)
 api_router.include_router(admin_provisioning_router)
 api_router.include_router(admin_academics_router)
+api_router.include_router(admin_records_router)
 api_router.include_router(od_router)
+api_router.include_router(faculty_dashboard_router)
 
 
 @api_router.get("/status", tags=["Status"])

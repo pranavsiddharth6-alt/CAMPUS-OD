@@ -15,6 +15,7 @@ from sqlalchemy import (
     Date,
     Integer,
     ForeignKey,
+    Float,
     Enum as SQLEnum,
     Index,
     UniqueConstraint,
@@ -54,6 +55,10 @@ class ODApplication(Base):
     event_category = Column(SQLEnum(EventCategory, name="event_category_enum"), nullable=False)
     host_institution = Column(String(200), nullable=False)
     venue_location = Column(String(255), nullable=False)
+    expected_venue_latitude = Column(Float, CheckConstraint(
+        "expected_venue_latitude BETWEEN -90 AND 90", name="ck_od_venue_latitude"))
+    expected_venue_longitude = Column(Float, CheckConstraint(
+        "expected_venue_longitude BETWEEN -180 AND 180", name="ck_od_venue_longitude"))
     
     # Schedule & multi-day duration
     start_date = Column(Date, nullable=False, index=True)

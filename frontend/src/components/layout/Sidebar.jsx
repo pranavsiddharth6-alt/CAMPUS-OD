@@ -19,30 +19,28 @@ export function Sidebar({ role = 'student', isOpen, onClose }) {
         icon: LayoutDashboard,
       },
       {
-        name: 'My Applications',
-        to: '/student/applications',
-        icon: FileText,
-      },
-      {
-        name: 'Apply for OD',
+        name: 'Prior OD',
         to: '/student/applications/new',
         icon: PlusCircle,
       },
+      { name: 'Post OD', to: '/student/post-od', icon: FileText },
     ],
     tutor: [
       {
-        name: 'Tutor Dashboard',
+        name: 'Dashboard',
         to: '/tutor/dashboard',
         icon: LayoutDashboard,
       },
       {
-        name: 'OD Verifications',
+        name: 'OD Approval',
         to: '/tutor/applications',
         icon: CheckSquare,
       },
+      { name: 'Reports', to: '/tutor/reports', icon: FileText },
     ],
     hod: [
       { name: 'HOD Dashboard', to: '/hod/dashboard', icon: LayoutDashboard },
+      { name: 'Prior OD Monitoring', to: '/hod/prior-od', icon: FileText },
       { name: 'Pending Requests', to: '/hod/applications', icon: CheckSquare },
       { name: 'Decision History', to: '/hod/history', icon: FileText },
     ],
@@ -62,6 +60,8 @@ export function Sidebar({ role = 'student', isOpen, onClose }) {
         to: '/admin/academics',
         icon: BookOpen,
       },
+      { name: 'College Records', to: '/admin/catalog', icon: BookOpen },
+      { name: 'OD Monitoring', to: '/admin/applications', icon: FileText },
     ],
   };
 
@@ -69,7 +69,7 @@ export function Sidebar({ role = 'student', isOpen, onClose }) {
 
   const roleLabels = {
     student: 'Student Workspace',
-    tutor: 'Class Tutor Workspace',
+    tutor: 'Faculty Workspace',
     hod: 'Head of Department Workspace',
     admin: 'Institutional Administration',
   };

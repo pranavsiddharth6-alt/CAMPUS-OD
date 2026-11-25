@@ -66,7 +66,7 @@ export function Header({ currentRole, onToggleMobileSidebar, user }) {
                     {user?.email}
                   </span>
                   <span className="text-[10px] text-slate-300 uppercase tracking-wider">
-                    {currentRole} Portal
+                    {currentRole === 'tutor' ? 'Faculty' : currentRole} Portal
                   </span>
                 </div>
 

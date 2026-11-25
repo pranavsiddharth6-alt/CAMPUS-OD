@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime
 from sqlalchemy import (
     CheckConstraint,
+    Boolean,
     Column,
     String,
     Text,
@@ -17,6 +18,7 @@ from sqlalchemy import (
     ForeignKey,
     Enum as SQLEnum,
     Index,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -62,6 +64,10 @@ class EvidenceSubmission(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     event_day_id = Column(UUID(as_uuid=True), ForeignKey("event_days.id", ondelete="RESTRICT"), nullable=False, index=True)
+    is_location_draft = Column(Boolean, nullable=False, server_default=text("false"))
+    map_capture_id = Column(UUID(as_uuid=True), ForeignKey(
+        "location_captures.id", name="fk_evidence_map_capture", ondelete="RESTRICT", use_alter=True,
+    ))
     
     # File references
     venue_photo_file_id = Column(UUID(as_uuid=True), ForeignKey("stored_files.id", ondelete="RESTRICT"), nullable=True, index=True)
@@ -74,8 +80,15 @@ class EvidenceSubmission(Base):
     event_day = relationship("EventDay", back_populates="evidence_submissions")
     venue_photo = relationship("StoredFile", foreign_keys=[venue_photo_file_id])
     organizer_proof = relationship("StoredFile", foreign_keys=[organizer_proof_file_id])
-    location_captures = relationship("LocationCapture", back_populates="evidence_submission", cascade="all, delete-orphan")
+    location_captures = relationship("LocationCapture", back_populates="evidence_submission",
+                                     foreign_keys="LocationCapture.evidence_submission_id", cascade="all, delete-orphan")
+    map_capture = relationship("LocationCapture", foreign_keys=[map_capture_id])
     reviews = relationship("EvidenceReview", back_populates="evidence_submission", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index("uq_event_day_location_draft", "event_day_id", unique=True,
+              sqlite_where=text("is_location_draft IS TRUE"), postgresql_where=text("is_location_draft IS TRUE")),
+    )
 
 
 class LocationCapture(Base):
@@ -90,6 +103,12 @@ class LocationCapture(Base):
     accuracy_meters = Column(Float, nullable=True)
     captured_at = Column(DateTime, nullable=False)  # GPS device timestamp
     server_recorded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    distance_metres = Column(Float)
+    allowed_radius_metres = Column(Float)
+    allowed_accuracy_metres = Column(Float)
+    verification_result = Column(String(32))
+    browser_time_present = Column(Boolean)
+    request_key = Column(String(36), unique=True, index=True)
 
     __table_args__ = (
         CheckConstraint("latitude BETWEEN -90 AND 90", name="ck_location_latitude_range"),
@@ -101,7 +120,8 @@ class LocationCapture(Base):
         ),
     )
 
-    evidence_submission = relationship("EvidenceSubmission", back_populates="location_captures")
+    evidence_submission = relationship("EvidenceSubmission", back_populates="location_captures",
+                                       foreign_keys=[evidence_submission_id])
 
 
 class EvidenceReview(Base):

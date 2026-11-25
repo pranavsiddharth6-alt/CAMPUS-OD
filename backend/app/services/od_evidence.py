@@ -18,16 +18,17 @@ from app.schemas.evidence import (
     EvidenceGPSView, EvidenceReviewView, EvidenceUploadRequest,
 )
 from app.services.od_applications import (
-    _active_hod_assignment, _check_revision, _detail, _load as _load_application, _scope, _transition,
+    PARTICIPATION_OPEN_STATUSES, _active_hod_assignment, _check_revision, _detail, _load as _load_application,
+    _scope, _transition, expected_venue, has_signed_form,
 )
+from app.services.map_od import capture_attempts, selected_capture
 from app.services.private_uploads import ApplicationError, PrivateUpload, read_upload, store_upload, write_with_uploads
 from app.services.storage import LocalStorageService
 
-_OPEN_STATUSES = {
-    ApplicationStatus.PRE_APPROVED,
-    ApplicationStatus.AWAITING_PARTICIPATION_PROOF,
-    ApplicationStatus.UNDER_FINAL_VERIFICATION,
-    ApplicationStatus.UNDER_TUTOR_CORRECTION_REVIEW,
+_EVIDENCE_READ_STATUSES = PARTICIPATION_OPEN_STATUSES | {
+    ApplicationStatus.UNDER_HOD_REVIEW,
+    ApplicationStatus.HOD_CORRECTION_REQUESTED,
+    ApplicationStatus.OD_FINALIZED,
 }
 
 
@@ -36,7 +37,8 @@ def _utc_naive(value: datetime) -> datetime:
 
 
 def _attempts(day: EventDay) -> list[EvidenceSubmission]:
-    return sorted(day.evidence_submissions, key=lambda item: (item.server_received_at, item.id))
+    return sorted((row for row in day.evidence_submissions if not row.is_location_draft),
+                  key=lambda item: (item.server_received_at, item.id))
 
 
 def _reviews(attempt: EvidenceSubmission) -> list[EvidenceReview]:
@@ -44,8 +46,12 @@ def _reviews(attempt: EvidenceSubmission) -> list[EvidenceReview]:
 
 
 def _complete(attempt: EvidenceSubmission) -> bool:
-    return bool(attempt.venue_photo and attempt.organizer_proof and len(attempt.location_captures) == 1
-                and attempt.location_captures[0].accuracy_meters is not None)
+    if not attempt.venue_photo or not attempt.organizer_proof:
+        return False
+    if expected_venue(attempt.event_day.application) is not None:
+        return bool(attempt.map_capture and attempt.map_capture.verification_result == "PASSED"
+                    and attempt.map_capture.evidence_submission.event_day_id == attempt.event_day_id)
+    return len(attempt.location_captures) == 1 and attempt.location_captures[0].accuracy_meters is not None
 
 
 def _day_state(day: EventDay):
@@ -73,9 +79,11 @@ def _app_state(app: ODApplication, user: AuthenticatedUser) -> None:
         return  # Corrected applications require an explicit tutor decision to return to the HOD.
     states = [_day_state(day) for day in app.event_days]
     if all_days_verified(app):
-        _transition(app, ApplicationStatus.UNDER_HOD_REVIEW, user,
-                    "The tutor verified every event day and forwarded the application for HOD review.")
-        return
+        if has_signed_form(app):
+            _transition(app, ApplicationStatus.UNDER_HOD_REVIEW, user,
+                        "The tutor verified every event day and forwarded the application for HOD review.")
+            return
+        target = ApplicationStatus.UNDER_FINAL_VERIFICATION
     elif states and all(state in {"VERIFIED", "REJECTED"} for state in states):
         target = ApplicationStatus.REJECTED
     elif "AWAITING_REVIEW" in states:
@@ -109,7 +117,7 @@ def _day(app: ODApplication, day_id: UUID) -> EventDay:
     event_day = next((day for day in app.event_days if day.id == day_id), None)
     if event_day is None:
         raise ApplicationError(404, "Event day not found.")
-    if app.status not in _OPEN_STATUSES:
+    if app.status not in PARTICIPATION_OPEN_STATUSES:
         raise ApplicationError(409, "This application is not open for participation evidence.")
     return event_day
 
@@ -121,14 +129,15 @@ def _file_view(file: StoredFile | None) -> EvidenceFileView | None:
 
 
 def _attempt_view(attempt: EvidenceSubmission) -> EvidenceAttemptView:
-    location = attempt.location_captures[0] if len(attempt.location_captures) == 1 else None
+    location = attempt.map_capture or (attempt.location_captures[0] if len(attempt.location_captures) == 1 else None)
     return EvidenceAttemptView(
         id=attempt.id, notes=attempt.submission_notes,
         submitted_at=attempt.submitted_at.replace(tzinfo=timezone.utc),
         server_received_at=attempt.server_received_at.replace(tzinfo=timezone.utc),
         gps=EvidenceGPSView(latitude=location.latitude, longitude=location.longitude,
                             accuracy_meters=location.accuracy_meters,
-                            captured_at=location.captured_at.replace(tzinfo=timezone.utc)) if location else None,
+                            captured_at=location.captured_at.replace(tzinfo=timezone.utc),
+                            verification_result=location.verification_result) if location else None,
         venue_photo=_file_view(attempt.venue_photo), organizer_proof=_file_view(attempt.organizer_proof),
         reviews=[EvidenceReviewView(review_status=review.review_status, remarks=review.remarks,
                                     reviewed_at=review.reviewed_at.replace(tzinfo=timezone.utc))
@@ -137,12 +146,18 @@ def _attempt_view(attempt: EvidenceSubmission) -> EvidenceAttemptView:
 
 
 def _view(app: ODApplication) -> ApplicationEvidenceView:
-    return ApplicationEvidenceView(status=app.status, days=[
-        EventDayEvidenceView(
-            id=day.id, event_date=day.event_date, session=day.session, state=_day_state(day),
-            attempts=[_attempt_view(attempt) for attempt in _attempts(day)],
-        ) for day in app.event_days
-    ])
+    uses_map_od = expected_venue(app) is not None
+    return ApplicationEvidenceView(
+        status=app.status, uses_map_od=uses_map_od, days=[
+            EventDayEvidenceView(
+                id=day.id, event_date=day.event_date, session=day.session, state=_day_state(day),
+                attempts=[_attempt_view(attempt) for attempt in _attempts(day)],
+                map_capture_passed=uses_map_od and any(
+                    row.verification_result == "PASSED" for row in capture_attempts(day)
+                ),
+            ) for day in app.event_days
+        ],
+    )
 
 
 class ODEvidenceService:
@@ -152,7 +167,13 @@ class ODEvidenceService:
 
     def detail(self, user: AuthenticatedUser, application_id: UUID) -> ApplicationEvidenceView:
         with self._sessions() as db:
-            return _view(_load(db, application_id, user))
+            app = _load(db, application_id, user)
+            has_rejected_evidence = app.status == ApplicationStatus.REJECTED and any(
+                day.evidence_submissions for day in app.event_days
+            )
+            if app.status not in _EVIDENCE_READ_STATUSES and not has_rejected_evidence:
+                raise ApplicationError(409, "Participation evidence requires approved Prior OD.")
+            return _view(app)
 
     def submit(
         self, user: AuthenticatedUser, application_id: UUID, day_id: UUID, data: EvidenceUploadRequest,
@@ -165,6 +186,13 @@ class ODEvidenceService:
             day = _day(app, day_id)
             if _day_state(day) not in {"NOT_SUBMITTED", "CORRECTION_REQUIRED"}:
                 raise ApplicationError(409, "This event day is not accepting a new submission.")
+            capture = None
+            if expected_venue(app) is not None:
+                capture = selected_capture(capture_attempts(day))
+                if capture is None or capture.verification_result != "PASSED":
+                    raise ApplicationError(409, "Save a passing Map OD capture for this event day before attaching files.")
+            elif data.gps is None:
+                raise ApplicationError(422, "Browser GPS is required for this legacy application.")
             now = _utc_naive(datetime.now(timezone.utc))
             attempts = _attempts(day)
             received = max(now, attempts[-1].server_received_at + timedelta(microseconds=1)) if attempts else now
@@ -172,11 +200,13 @@ class ODEvidenceService:
                 venue_photo=store_upload(self._storage, venue_photo, user.user_id, keys),
                 organizer_proof=store_upload(self._storage, organizer_proof, user.user_id, keys),
                 submission_notes=data.notes or None, submitted_at=_utc_naive(data.submitted_at), server_received_at=received,
+                map_capture=capture,
             )
-            attempt.location_captures.append(LocationCapture(
-                latitude=data.gps.latitude, longitude=data.gps.longitude, accuracy_meters=data.gps.accuracy_meters,
-                captured_at=_utc_naive(data.gps.captured_at), server_recorded_at=now,
-            ))
+            if capture is None:
+                attempt.location_captures.append(LocationCapture(
+                    latitude=data.gps.latitude, longitude=data.gps.longitude, accuracy_meters=data.gps.accuracy_meters,
+                    captured_at=_utc_naive(data.gps.captured_at), server_recorded_at=now,
+                ))
             day.evidence_submissions.append(attempt)
             day.day_status = EventDayStatus.PENDING
             day.verification_notes = None
@@ -248,6 +278,8 @@ class ODEvidenceService:
             _check_revision(app, decision.expected_revision)
             if app.status != ApplicationStatus.UNDER_HOD_REVIEW or not all_days_verified(app):
                 raise ApplicationError(409, "This application requires completed tutor verification and pending HOD review.")
+            if not has_signed_form(app):
+                raise ApplicationError(409, "The signed OD form is required for final approval.")
             _transition(app, targets[decision.action], user, decision.remarks or None,
                         hod_assignment_id=assignment_id)
             db.flush()
@@ -257,7 +289,8 @@ class ODEvidenceService:
         with self._sessions() as db:
             attempt = db.scalar(
                 select(EvidenceSubmission).join(EvidenceSubmission.event_day).join(EventDay.application)
-                .where(ODApplication.id == application_id, EvidenceSubmission.id == attempt_id, _scope(user))
+                .where(ODApplication.id == application_id, EvidenceSubmission.id == attempt_id, _scope(user),
+                       ODApplication.status.in_(_EVIDENCE_READ_STATUSES | {ApplicationStatus.REJECTED}))
                 .options(joinedload(EvidenceSubmission.venue_photo), joinedload(EvidenceSubmission.organizer_proof))
             )
             file = (attempt.venue_photo if kind == "venue-photo" else attempt.organizer_proof) if attempt else None

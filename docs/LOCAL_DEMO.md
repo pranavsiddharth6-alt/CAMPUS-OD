@@ -47,6 +47,10 @@ The expected values are `connected = True` and `database = SQLite`. The dev serv
 
 ## 3. Provision and activate the fictional accounts
 
+In **User Management**, select **Fill demo Student**, **Fill demo Faculty**, or **Fill demo Head of Department** to load the walkthrough fixtures. Check the form and select **Create invitation**. The same page accepts manually entered fictional records and manages enrollments. Set up the needed department, academic year, and class in **College Records** before inviting a student. **Academic Assignments** continues to manage class tutors and department HODs.
+
+To test separate Registrar and Principal sign-ins, invite each as an **Administrator** with a distinct fictional email and staff ID. Use the existing local invitation handoff to activate each account. The demo bootstrap command is for the first active administrator.
+
 1. Sign in as the demo administrator. Open **User Management** and create any missing Student, Tutor, and Head of Department accounts from the approved roster. The HOD account reserves the Demo Department assignment during provisioning. Note each invitation ID.
 2. Sign out of the administrator portal. In a local operator terminal, copy one invitation code at a time using its ID:
 
@@ -68,14 +72,14 @@ The expected values are `connected = True` and `database = SQLite`. The dev serv
 
 ## 4. Present the workflow
 
-Use separate browser profiles for the administrator, student, tutor, and HOD if you want to switch roles without repeated sign-ins. Tabs in a single profile share one refresh cookie. The administrator overview shows labeled sample figures. Use **User Management** and **Academic Assignments** for the current demo records.
+Use separate browser profiles for the administrator, student, tutor, and HOD if you want to switch roles without repeated sign-ins. Tabs in a single profile share one refresh cookie. Use **User Management** and **Academic Assignments** for demo records and mappings.
 
-1. Sign in as the student and submit an OD application with at least two event dates, a fictional signed form, and optional supporting documents. The server assigns the current class tutor.
-2. Sign in as the assigned tutor, open the application, download the original form, and request a correction with remarks. As the student, correct and resubmit it. As the tutor, preapprove the corrected application.
-3. As the student, open the preapproved application and select **Capture location** on each event day. Grant location permission and attach a fictional venue image (PNG or JPEG) and organizer proof (PDF, PNG, or JPEG). Use a browser location override for fictional presentation coordinates. Permission denial leaves submission unavailable until a capture succeeds.
-4. As the tutor, download the evidence, inspect GPS and timestamps, and review each day. Request an evidence correction to demonstrate a new attempt and retained history. After the student resubmits, verify the last outstanding day. The tutor and student will see **Awaiting HOD review**.
-5. Sign in as the HOD, open **Pending Requests**, and review the original form, tutor remarks, and GPS and files for both days. Select **Record decision**, then **Approve and finalize OD**. The application moves to **Decision History** and the student sees **OD finalized** with the HOD’s name, timestamp, and any remarks.
-6. To demonstrate an HOD correction, choose **Request correction** and provide remarks on a different request. The student resubmits a revised description or supporting documents. The tutor can reopen individual evidence days and then forward the correction after every day is verified.
+1. Sign in as the student and use **Prior OD** to enter the event name, organizer, venue, category, purpose, and one or more distinct dates. Place the expected venue pin or enter known venue coordinates. Supporting documents are optional. The server assigns the current class tutor.
+2. Sign in as the assigned Faculty member, open **OD Approval**, and review the expected venue pin. Choose **Approve Prior OD** with remarks or request a correction.
+3. Sign in as the HOD and open **Prior OD Monitoring** to see your department's applications and status history. Final review decisions remain in **Pending Requests**.
+4. As the student, open **Map OD** from the approved record in **Post OD**. Choose the event day and capture GPS while the server is on that date in IST. Use a browser location override for fictional coordinates. A pinned application needs a passing capture before its venue image and organizer proof can be attached. Legacy applications continue to use the combined upload.
+5. As Faculty, inspect the evidence and review each day. A new application without a signed form stays in tutor verification after the last day is verified. The full signed-form upload and submission screen is deferred to Phase 5.
+6. To demonstrate final approval or an HOD correction, use a legacy application with its signed form already on file and verified evidence. Open **Pending Requests**, inspect the documents and evidence, and record the appropriate decision. Finalized applications appear in **Decision History**.
 7. As the administrator, open **Academic Assignments** to inspect class-tutor and department HOD mappings. Changing a class-tutor mapping applies to future applications. Ending or replacing an HOD assignment preserves its history and revokes the affected HOD sessions.
 
 The default file size limit is 5 MiB per upload. Use fictional files without student signatures, personal data, or real location metadata.

@@ -29,6 +29,7 @@ class Department(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     code = Column(String(20), unique=True, nullable=False, index=True)
+    is_active = Column(Boolean, nullable=False, server_default=text("true"))
     name = Column(String(150), unique=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
@@ -88,6 +89,7 @@ class Class(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(100), nullable=False)  # e.g., "B.Sc Computer Science - Year III - Sec A"
+    is_active = Column(Boolean, nullable=False, server_default=text("true"))
     department_id = Column(UUID(as_uuid=True), ForeignKey("departments.id", ondelete="RESTRICT"), nullable=False, index=True)
     academic_year_id = Column(UUID(as_uuid=True), ForeignKey("academic_years.id", ondelete="RESTRICT"), nullable=False, index=True)
     batch = Column(String(20), nullable=False)  # e.g., "2023-2026"
